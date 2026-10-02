@@ -1,0 +1,23 @@
+# Local development tooling only. Nothing here is deployed: the apps install app/requirements.txt
+# and the jobs declare their own dependencies in resources/jobs.yml.
+[project]
+name = "cdp_security"
+version = "0.1.0"
+requires-python = ">=3.11"
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "ruff",
+    "streamlit>=1.44,<2",
+    "databricks-sdk>=0.60",
+    "psycopg[binary]>=3.2,<4",
+    "psycopg-pool>=3.2,<4",
+    "requests>=2.31",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120

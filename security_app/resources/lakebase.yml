@@ -1,0 +1,11 @@
+resources:
+  database_instances:
+    cdp_security_db:
+      name: ${var.lakebase_instance}
+      capacity: ${var.lakebase_capacity}
+      enable_pg_native_login: false        # OAuth (Databricks identity) logins only
+
+
+# No database_catalogs resource: the bundle never creates a Unity Catalog catalog. The reporting ETL
+# reads Lakebase directly over Postgres, and the app data lives in the instance's built-in
+# databricks_postgres database (schema cdp_security, created by the migrate job).
