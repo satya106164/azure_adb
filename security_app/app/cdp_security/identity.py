@@ -5,13 +5,13 @@ With user authorization enabled (scope iam.current-user:read), the
 X-Forwarded-Access-Token header carries an on-behalf-of token that we use only
 to read the user's own group memberships. All data changes are made by the
 App's service principal and attributed to the user in the audit trail.
+App roles come only from Entra group membership (there is no in-app role table).
 """
 from __future__ import annotations
 
 import logging
 
 from .config import get_settings
-from .db import fetch_all
 from .models import AppRole, CurrentUser
 
 log = logging.getLogger(__name__)
@@ -33,7 +33,7 @@ def groups_from_token(token: str | None) -> set[str]:
         w = WorkspaceClient(host=_host(), token=token, auth_type="pat")
         me = w.current_user.me()
         return {g.display for g in (me.groups or []) if g.display}
-    except Exception as exc:  # roles degrade to DB-assigned roles only
+    except Exception as exc:  # no roles: the person can still use the Data access app
         log.warning("Could not read group memberships with the user token: %s", exc)
         return set()
 
@@ -47,8 +47,7 @@ def resolve_app_roles(email: str, token: str | None) -> frozenset[AppRole]:
         settings.break_glass_group.lower(): AppRole.BREAK_GLASS,
     }
     roles = {group_map[g.lower()] for g in groups_from_token(token) if g.lower() in group_map}
-    rows = fetch_all("SELECT app_role FROM app_role_member WHERE email = %s", (email.lower(),))
-    roles |= {AppRole(r["app_role"]) for r in rows}
+    roles |= {AppRole(r) for r in settings.local_dev_roles if r in AppRole.__members__}
     return frozenset(roles)
 
 

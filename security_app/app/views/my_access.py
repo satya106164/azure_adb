@@ -11,8 +11,8 @@ st.subheader("What you can access")
 if not grants:
     st.info("You have no access through this app yet. Use Request access to ask for some.")
 for g in grants:
-    target = g["data_product_name"] or g["ai_use_case_code"] or g["project_code"] or g["group_name"]
-    with st.expander(f"{target} - {g['privilege_level'].lower()} - until {g['valid_to']:%d %b %Y}"):
+    ends = f"until {g['valid_to']:%d %b %Y}" if g["status"] == "ACTIVE" else ui.STATUS_LABELS.get(g["status"], "")
+    with st.expander(f"{service.access_label(g)} - {ends}"):
         st.markdown(f"{ui.classification(g['classification_code'])} {ui.status(g['status'])}"
                     + ("  :red[break-glass]" if g["is_break_glass"] else ""))
         st.caption(f"Group {g['group_name']} - request {g['request_ref']}")
@@ -20,7 +20,7 @@ for g in grants:
             continue
         left, right = st.columns(2)
         with left.form(f"extend-{g['grant_id']}"):
-            days = st.number_input("Extend by (days)", 1, 365, 90)
+            days = st.number_input("Extend by (days)", 1, 3650, 90)
             why = st.text_area("Why do you still need it?", key=f"why-{g['grant_id']}")
             if st.form_submit_button("Request extension", disabled=g["is_break_glass"]):
                 ui.act(lambda: service.request_extension(user, g["grant_id"], int(days), why),
@@ -29,13 +29,13 @@ for g in grants:
             st.write("No longer need it?")
             if st.button("Give up this access", key=f"revoke-{g['grant_id']}"):
                 ui.act(lambda: service.revoke_grant(user, g["grant_id"], "Given up by the user"),
-                       "Access will be removed within the next provisioning run.")
+                       "An admin will remove you from the group; you will be told when it is done.")
 
 st.subheader("My requests")
 requests_ = queries.my_requests(user.email)
-ui.table(requests_, ["request_ref", "request_type", "status", "group_name", "classification_code",
-                     "beneficiary_email", "project_code", "current_stage_no", "total_stages", "submitted_at"])
-cancellable = [r for r in requests_ if r["status"] in ("PENDING_APPROVAL", "PROVISIONING_FAILED")]
+ui.table(requests_, ["request_ref", "request_type", "status", "data_product_name", "group_name",
+                     "classification_code", "beneficiary_email", "current_stage_no", "total_stages", "submitted_at"])
+cancellable = [r for r in requests_ if r["status"] == "PENDING_APPROVAL"]
 if cancellable:
     pick = st.selectbox("Cancel a request", [None] + cancellable,
                         format_func=lambda r: "Choose a request" if r is None else f"{r['request_ref']} - {r['group_name']}")

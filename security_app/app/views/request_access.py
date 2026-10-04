@@ -1,6 +1,8 @@
+from datetime import date, timedelta
+
 import streamlit as st
 
-from cdp_security import queries, service, ui
+from cdp_security import directory, queries, service, ui
 
 user = ui.user()
 st.title("Request access")
@@ -8,49 +10,60 @@ ui.show_flash()
 
 groups = queries.requestable_groups()
 if not groups:
-    st.info("Nothing is open for requests yet. Ask a platform admin to register data products.")
+    st.info("Nothing is open for requests yet. Ask a platform admin to register data products and their groups.")
     st.stop()
 
-kinds = {"DATA_PRODUCT": "Data product", "AI_USE_CASE": "AI / Genie use case", "PROJECT": "Project",
-         "WORKSPACE": "Workspace"}
-present = [k for k in kinds if any(g["purpose"] == k for g in groups)]
-kind = st.radio("What do you need?", present, format_func=kinds.get, horizontal=True)
-options = [g for g in groups if g["purpose"] == kind]
 group = st.selectbox(
-    "Access", options,
-    format_func=lambda g: f"{g['data_product_name'] or g['ai_use_case_name'] or g['project_name'] or g['workspace_name']}"
-                          f" - {g['privilege_level'].lower()}")
-
+    "Data product", groups,
+    format_func=lambda g: f"{service.access_label(g)} - {g['data_product_code']}"
+                          + (f" - {g['group_name']}" if sum(x["data_product_code"] == g["data_product_code"]
+                                                            for x in groups) > 1 else ""))
 cls = next(c for c in queries.classifications() if c["classification_code"] == group["classification_code"])
 st.markdown(f"{ui.classification(cls['classification_code'])} - {cls['description']}")
-if group.get("description"):
-    st.caption(group["description"])
+where = f" Data in `{group['catalog_name']}.{group['schema_name']}`." if group["schema_name"] else ""
+st.caption(f"Access through group {group['group_name']}.{where} " + (group["description"] or ""))
 rules = queries.approval_rules(cls["classification_code"])
-st.caption("Approval route: " + " then ".join(r["approver_role"].replace("_", " ").lower() for r in rules)
-           + f". Maximum duration {cls['max_grant_days']} days.")
+st.caption("Approval route: " + " then ".join(r["approver_role"].replace("_", " ").lower() for r in rules) + ".")
 
-projects = queries.projects_for_group(group)
+OTHER = {"email": "", "display_name": "Someone not in the list (type their email)"}
+
+
+@st.cache_data(ttl=600, show_spinner="Loading people...")
+def people() -> list[dict]:
+    return directory.people()
+
+
+# Outside the form, so choosing "someone else" shows the person picker straight away
+beneficiary = None
+if st.checkbox("I am requesting this for someone else"):
+    others = [p for p in people() if p["email"] != user.email]
+    who = st.selectbox("Who is it for?", others + [OTHER], index=None, placeholder="Start typing a name or email",
+                       format_func=lambda p: p["display_name"] if p["email"] == ""
+                       else f"{p['display_name']} ({p['email']})" if p["display_name"] != p["email"] else p["email"])
+    if who is None:
+        beneficiary = ""  # ticked but nobody chosen: refused on submit, never silently "myself"
+    elif who["email"] == "":
+        beneficiary = st.text_input("Their work email").strip()
+    else:
+        beneficiary = who["email"]
+
 with st.form("request"):
-    project = st.selectbox(
-        "Project" + (" (required)" if cls["requires_project"] else " (optional)"),
-        ([] if cls["requires_project"] else [None]) + projects,
-        format_func=lambda p: "No project" if p is None else f"{p['code']} - {p['name']}")
-    if cls["requires_project"] and not projects:
-        st.warning("No active project is approved to use this data. Ask the data owner to link your project first.")
-    for_someone_else = st.checkbox("I am requesting this for someone else")
-    beneficiary = st.text_input("Their email", disabled=False) if for_someone_else else None
-    days = st.number_input("For how many days?", 1, cls["max_grant_days"], min(90, cls["max_grant_days"]))
+    today = date.today()
+    until = st.date_input("Access until", value=date(2030, 1, 1), min_value=today + timedelta(days=1),
+                          max_value=date(2099, 12, 31), format="DD-MM-YYYY",
+                          help="Your approvers see this date. Access is also re-confirmed in periodic reviews.")
     why = st.text_area("Business justification", help="What will the access be used for? At least 20 characters.")
     ack = True
     if cls["classification_code"] != "GENERAL":
         ack = st.checkbox("I will handle this data under the data protection policy and only for the stated purpose.")
     if st.form_submit_button("Submit request", type="primary"):
-        if not ack:
+        if beneficiary == "":
+            st.error("Choose who the access is for, or untick \"for someone else\".")
+        elif not ack:
             st.error("Confirm the data handling statement to continue.")
         else:
             result = ui.act(lambda: service.submit_request(
-                user, access_group_id=group["access_group_id"], justification=why, duration_days=int(days),
-                project_id=project["project_id"] if project else None,
+                user, group_code=group["group_code"], justification=why, duration_days=(until - today).days,
                 beneficiary_email=beneficiary or None), rerun=False)
             if result:
                 ui.flash(f"Request {result['request_ref']} submitted. You can follow it on My access.")

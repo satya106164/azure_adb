@@ -1,4 +1,4 @@
-"""Catalog admin app (admins, auditors, security): reference data, groups, operations, audit."""
+"""Catalog admin app (admins, auditors, security): workspaces, data products, groups, fulfilment, audit."""
 import logging
 
 import streamlit as st
@@ -23,8 +23,8 @@ if not any(user.has(r) for r in (AppRole.ADMIN, AppRole.AUDITOR, AppRole.SECURIT
 pages = []
 if user.has(AppRole.ADMIN):
     pages += [st.Page("views/catalog_admin.py", title="Catalog", icon=":material/account_tree:"),
-              st.Page("views/operations.py", title="Operations", icon=":material/sync_problem:")]
-pages.append(st.Page("views/audit.py", title="Audit and drift", icon=":material/policy:", default=not pages))
+              st.Page("views/fulfilment.py", title="Fulfilment", icon=":material/task_alt:")]
+pages.append(st.Page("views/audit.py", title="Audit", icon=":material/policy:", default=not pages))
 
 ui.sidebar(user, "Catalog admin", ("Open Data access", settings.app_url))
 st.navigation(pages).run()

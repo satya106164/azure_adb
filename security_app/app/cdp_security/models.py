@@ -19,10 +19,8 @@ class RequestType(_StrEnum):
 class RequestStatus(_StrEnum):
     DRAFT = "DRAFT"
     PENDING_APPROVAL = "PENDING_APPROVAL"
-    APPROVED = "APPROVED"
-    PROVISIONING = "PROVISIONING"
+    APPROVED = "APPROVED"          # approved; an admin has still to add the member
     FULFILLED = "FULFILLED"
-    PROVISIONING_FAILED = "PROVISIONING_FAILED"
     REJECTED = "REJECTED"
     CANCELLED = "CANCELLED"
 
@@ -36,12 +34,11 @@ class TaskStatus(_StrEnum):
 
 
 class GrantStatus(_StrEnum):
-    PENDING_PROVISION = "PENDING_PROVISION"
+    PENDING_PROVISION = "PENDING_PROVISION"  # an admin adds the member by hand, then marks it granted
     ACTIVE = "ACTIVE"
-    PENDING_REVOKE = "PENDING_REVOKE"
+    PENDING_REVOKE = "PENDING_REVOKE"        # an admin removes the member by hand, then marks it removed
     REVOKED = "REVOKED"
     EXPIRED = "EXPIRED"
-    FAILED = "FAILED"
 
 
 class RevokeReason(_StrEnum):
@@ -60,30 +57,14 @@ class ApproverRole(_StrEnum):
     DATA_OWNER = "DATA_OWNER"
     STEWARD = "STEWARD"
     SECURITY = "SECURITY"
-    PROJECT_SPONSOR = "PROJECT_SPONSOR"
 
 
 class AppRole(_StrEnum):
-    """Global roles. Data owner / steward / sponsor are contextual (per object)."""
+    """Global roles, from Entra group membership. Data owner / steward are per data product."""
     ADMIN = "ADMIN"
     SECURITY = "SECURITY"
     AUDITOR = "AUDITOR"
     BREAK_GLASS = "BREAK_GLASS"
-
-
-class GroupPurpose(_StrEnum):
-    DATA_PRODUCT = "DATA_PRODUCT"
-    PROJECT = "PROJECT"
-    AI_USE_CASE = "AI_USE_CASE"
-    WORKSPACE = "WORKSPACE"
-
-
-class PrivilegeLevel(_StrEnum):
-    READ = "READ"
-    WRITE = "WRITE"
-    CONTRIB = "CONTRIB"
-    USER = "USER"
-    ADMIN = "ADMIN"
 
 
 @dataclass(frozen=True)

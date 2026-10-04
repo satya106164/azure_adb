@@ -1,11 +1,11 @@
-"""Send queued notifications (run by jobs only)."""
+"""Send queued notifications (run by jobs only, one run at a time)."""
 from __future__ import annotations
 
 import logging
 
 import requests
 
-from .db import transaction
+from .db import execute, fetch_all
 
 log = logging.getLogger(__name__)
 MAX_ATTEMPTS = 5
@@ -33,22 +33,23 @@ class TeamsWorkflowSender:
 def dispatch(graph=None, sender_mailbox: str | None = None, teams: TeamsWorkflowSender | None = None,
              dry_run: bool = True, limit: int = 200) -> dict[str, int]:
     stats = {"sent": 0, "failed": 0}
-    with transaction() as cur:
-        cur.execute("""
-            UPDATE notification_outbox SET attempts = attempts + 1
-            WHERE notification_id IN (SELECT notification_id FROM notification_outbox
-                                      WHERE status IN ('QUEUED','FAILED') ORDER BY created_at
-                                      FOR UPDATE SKIP LOCKED LIMIT %s)
-            RETURNING *""", (limit,))
-        batch = cur.fetchall()
-    for n in batch:
+    queued = fetch_all(f"SELECT * FROM notification_outbox WHERE status IN ('QUEUED', 'FAILED') "
+                       f"ORDER BY created_at LIMIT {int(limit)}")
+    for n in queued:
+        # Claim: count the attempt only if nobody else did meanwhile
+        if execute("UPDATE notification_outbox SET attempts = attempts + 1 WHERE notification_id = :id "
+                   "AND attempts = :a AND status IN ('QUEUED', 'FAILED')",
+                   {"id": n["notification_id"], "a": n["attempts"]}) != 1:
+            continue
+        attempts = n["attempts"] + 1
+        recipients = [r for r in (n["recipients"] or "").split(",") if r]
         try:
             if dry_run:
-                log.info("DRY RUN %s to %s: %s", n["channel"], n["recipients"], n["subject"])
+                log.info("DRY RUN %s to %s: %s", n["channel"], recipients, n["subject"])
             elif n["channel"] == "EMAIL":
                 if not (graph and sender_mailbox):
                     raise RuntimeError("Email sender not configured")
-                graph.send_mail(sender_mailbox, list(n["recipients"]), n["subject"], n["body"])
+                graph.send_mail(sender_mailbox, recipients, n["subject"], n["body"])
             else:
                 if not teams:
                     raise RuntimeError("Teams webhook not configured")
@@ -56,12 +57,11 @@ def dispatch(graph=None, sender_mailbox: str | None = None, teams: TeamsWorkflow
             status, err = "SENT", None
             stats["sent"] += 1
         except Exception as exc:  # noqa: BLE001
-            status = "DEAD" if n["attempts"] >= MAX_ATTEMPTS else "FAILED"
+            status = "DEAD" if attempts >= MAX_ATTEMPTS else "FAILED"
             err = str(exc)[:1000]
             stats["failed"] += 1
             log.warning("Notification %s failed: %s", n["notification_id"], err)
-        with transaction() as cur:
-            cur.execute("UPDATE notification_outbox SET status = %s, last_error = %s, "
-                        "sent_at = CASE WHEN %s = 'SENT' THEN now() END WHERE notification_id = %s",
-                        (status, err, status, n["notification_id"]))
+        execute("UPDATE notification_outbox SET status = :s, last_error = :err, "
+                "sent_at = CASE WHEN :s = 'SENT' THEN current_timestamp() END WHERE notification_id = :id",
+                {"s": status, "err": err, "id": n["notification_id"]})
     return stats

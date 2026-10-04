@@ -1,97 +1,73 @@
 import pytest
 
-from cdp_security import drift, naming, templates, ucsql
-from cdp_security.drift import GrantKey
-from cdp_security.models import PrivilegeLevel
+from cdp_security import naming, notify, service
 
 
-# ---- naming --------------------------------------------------------------------
-def test_group_name_convention():
-    assert naming.group_name("prd", "DATA_PRODUCT", "member_contributions", "READ") == \
-        "grp-dbx-prd-dp-member_contributions-read"
-    assert naming.group_name("dev", "AI_USE_CASE", "genie_members", "USER") == "grp-dbx-dev-ai-genie_members-user"
+# ---- group names -------------------------------------------------------------------
+@pytest.mark.parametrize("name", ["grp-dbx-prd-dp-member_contributions-read", "Finance Readers (PBI)",
+                                  "sg.analytics-users"])
+def test_group_names_accepted(name):
+    assert naming.validate_group_name(f"  {name} ") == name
 
 
-def test_group_name_rejects_wrong_level_and_bad_code():
+@pytest.mark.parametrize("name", ["", "ab", "-starts-with-dash", "two  spaces", "semi;colon", "x" * 300,
+                                  "grp`; DROP TABLE x"])
+def test_group_names_refused(name):
     with pytest.raises(naming.NamingError):
-        naming.group_name("prd", "DATA_PRODUCT", "x_y", "ADMIN")
-    with pytest.raises(naming.NamingError):
-        naming.group_name("prd", "DATA_PRODUCT", "Bad-Code", "READ")
+        naming.validate_group_name(name)
 
 
-def test_managed_group_detection():
-    assert naming.is_managed_group("grp-dbx-prd-dp-abc-read", "prd")
-    assert not naming.is_managed_group("grp-dbx-dev-dp-abc-read", "prd")
-    assert not naming.is_managed_group("grp-dbx-prd-app-cdp_security-admin", "prd")
+def test_suggested_group_name_follows_the_convention():
+    assert naming.suggest_group_name("dev", "Member Contributions!") == "grp-dbx-dev-dp-member_contributions-read"
 
 
-# ---- UC SQL ----------------------------------------------------------------------
-def test_grant_sql_is_quoted():
-    sql = ucsql.build_grant_sql("GRANT", "SCHEMA", "dbanalytics.member_contributions", "select",
-                                "grp-dbx-prd-dp-member_contributions-read")
-    assert sql == ("GRANT SELECT ON SCHEMA `dbanalytics`.`member_contributions` "
-                   "TO `grp-dbx-prd-dp-member_contributions-read`")
+# ---- data products -------------------------------------------------------------------
+def _dp(**kw):
+    values = dict(name="Sales", description=None, data_product_type="POWER_BI", project=None, catalog=None,
+                  schema=None, classification_code="GENERAL", owner_email="o@x.com", steward_email="s@x.com",
+                  home_workspace_code=None)
+    values.update(kw)
+    return service._data_product_values(**values)
 
 
-def test_revoke_sql():
-    assert ucsql.build_grant_sql("REVOKE", "CATALOG", "dbanalytics", "USE CATALOG",
-                                 "grp-dbx-prd-dp-a1-read").startswith("REVOKE USE CATALOG ON CATALOG `dbanalytics` FROM")
+def test_schema_is_optional_except_for_the_schema_type():
+    assert _dp()["catalog"] is None and _dp()["schema"] is None
+    assert _dp(data_product_type="GENIE_AGENT", catalog="Main", schema="Sales")["schema"] == "sales"
+    with pytest.raises(service.ServiceError, match="catalog and schema"):
+        _dp(data_product_type="SCHEMA", catalog="main")
+    with pytest.raises(service.ServiceError, match="catalog the schema is in"):
+        _dp(schema="sales")
 
 
-@pytest.mark.parametrize("priv", ["ALL PRIVILEGES", "MANAGE", "OWNERSHIP"])
-def test_dangerous_privileges_blocked(priv):
-    with pytest.raises(ucsql.GrantSqlError):
-        ucsql.build_grant_sql("GRANT", "SCHEMA", "a.b", priv, "grp-dbx-prd-dp-a1-read")
+def test_data_product_type_and_project():
+    assert set(service.DATA_PRODUCT_TYPES) == {"DATABRICKS_DASHBOARD", "POWER_BI", "GENIE_AGENT", "CUSTOM_AGENT",
+                                               "DATABRICKS_APP", "SCHEMA"}
+    assert _dp(project="  Pensions 2027 ")["project"] == "Pensions 2027"
+    with pytest.raises(service.ServiceError, match="Type must be"):
+        _dp(data_product_type="TABLE")
 
 
-def test_injection_blocked():
-    with pytest.raises(ucsql.GrantSqlError):
-        ucsql.build_grant_sql("GRANT", "SCHEMA", "a.b`; DROP TABLE x; --", "SELECT", "grp-dbx-prd-dp-a1-read")
-    with pytest.raises(naming.NamingError):
-        ucsql.build_grant_sql("GRANT", "SCHEMA", "a.b", "SELECT", "someone@x.com")
+def test_odd_schema_names_refused():
+    with pytest.raises(service.ServiceError, match="only letters"):
+        _dp(data_product_type="SCHEMA", catalog="main", schema="a`; drop")
 
 
-# ---- templates -----------------------------------------------------------------------
-def test_read_template_has_no_write():
-    privs = {p for _, p in templates.data_product_entitlements(PrivilegeLevel.READ)}
-    assert "MODIFY" not in privs and {"USE CATALOG", "USE SCHEMA", "SELECT"} <= privs
+def test_workspace_types():
+    assert list(service.WORKSPACE_TYPES) == ["INGESTION", "ANALYTICS_PBI", "MLOPS", "DATABRICKS_DASHBOARDS"]
 
 
-def test_ai_user_cannot_hold_manage():
-    with pytest.raises(templates.TemplateError):
-        templates.validate_asset_privilege("GENIE_SPACE", "CAN_MANAGE", "USER")
-    assert templates.validate_asset_privilege("GENIE_SPACE", "CAN_MANAGE", "ADMIN") == "CAN_MANAGE"
+def test_access_label_names_the_type():
+    assert service.access_label({"data_product_name": "Sales", "data_product_type": "GENIE_AGENT"}) == \
+        "Sales (Genie agent)"
 
 
-def test_ai_template_two_levels():
-    assets = [("a1", "GENIE_SPACE"), ("a2", "SERVING_ENDPOINT")]
-    assert templates.ai_use_case_entitlements("USER", assets) == [("a1", "CAN_RUN"), ("a2", "CAN_QUERY")]
-    assert templates.ai_use_case_entitlements("ADMIN", assets)[0] == ("a1", "CAN_MANAGE")
-
-
-# ---- drift -------------------------------------------------------------------------------
-G = "grp-dbx-prd-dp-member-read".replace("member", "members")
-
-
-def test_drift_missing_and_unexpected():
-    desired = {GrantKey.of("SCHEMA", "dbanalytics.members", G, "SELECT")}
-    actual = {GrantKey.of("SCHEMA", "dbanalytics.members", "grp-dbx-prd-dp-members-write", "SELECT"),
-              GrantKey.of("SCHEMA", "dbanalytics.members", "jane@x.com", "SELECT"),
-              GrantKey.of("SCHEMA", "dbanalytics.members", "platform-admins", "SELECT")}
-    found = {f.finding_type for f in drift.compare_grants(desired, actual, env="prd")}
-    assert found == {"MISSING_GRANT", "UNEXPECTED_GRANT", "DIRECT_USER_GRANT"}
-
-
-def test_drift_unmanaged_principal_flagged_only_on_restricted():
-    actual = {GrantKey.of("SCHEMA", "dbanalytics.members", "platform-admins", "SELECT")}
-    assert drift.compare_grants(set(), actual, env="prd") == []
-    out = drift.compare_grants(set(), actual, env="prd", restricted={"dbanalytics.members"})
-    assert out[0].severity == "HIGH"
-    assert drift.compare_grants(set(), actual, env="prd", restricted={"dbanalytics.members"},
-                                allowlist=["platform-admins"]) == []
-
-
-def test_drift_members():
-    out = drift.compare_members("g", must_have={"a@x.com"}, may_have={"b@x.com"}, actual={"b@x.com", "c@x.com"})
-    assert {(f.finding_type, f.principal) for f in out} == {("MISSING_MEMBER", "a@x.com"),
-                                                            ("UNEXPECTED_MEMBER", "c@x.com")}
+def test_admin_alerts_link_to_the_admin_app(monkeypatch):
+    monkeypatch.setenv("CDP_SECURITY_APP_URL", "https://req")
+    monkeypatch.setenv("CDP_SECURITY_ADMIN_APP_URL", "https://adm")
+    from cdp_security.config import get_settings
+    get_settings.cache_clear()
+    try:
+        assert notify._footer(admin=True).endswith("https://adm")
+        assert notify._footer().endswith("https://req")
+    finally:
+        get_settings.cache_clear()

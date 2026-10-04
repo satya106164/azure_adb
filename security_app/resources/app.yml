@@ -1,19 +1,23 @@
-# Two apps, one source folder, one Lakebase schema.
-# Each app has its own service principal -> its own Postgres role -> its own grants
-# (sql/lakebase/roles_template.sql), so the database itself enforces the split.
+# Two apps, one source folder, one schema of Delta tables reached through the SQL warehouse.
+# Each app has its own service principal with its own per-table Unity Catalog grants
+# (app/cdp_security/appgrants.py, applied by the migrate job), so Unity Catalog enforces the split.
 resources:
   apps:
     cdp_security_request_app:
       name: cdp-security-${var.env_code}
-      description: Data access - request, approve and review access to data products and AI assets
+      description: Data access - request, approve and review read access to data products
       source_code_path: ../app
       config:
         command: ["streamlit", "run", "request_app.py"]
-        env:
+        env: &app_env
           - name: CDP_SECURITY_ENV
             value: ${var.env_code}
-          - name: LAKEBASE_INSTANCE_NAME
-            value: ${var.lakebase_instance}
+          - name: DATABRICKS_WAREHOUSE_ID
+            value: ${var.warehouse_id}
+          - name: CDP_SECURITY_CATALOG
+            value: ${var.catalog}
+          - name: CDP_SECURITY_SCHEMA
+            value: ${var.schema}
           - name: CDP_SECURITY_DRY_RUN
             value: ${var.dry_run}
           - name: CDP_SECURITY_ADMIN_GROUP
@@ -32,14 +36,12 @@ resources:
             value: ${var.app_url}
           - name: CDP_SECURITY_ADMIN_APP_URL
             value: ${var.admin_app_url}
-          - name: CDP_SECURITY_PROVISIONING_JOB_ID
-            value: ${var.provisioning_job_id}
-      resources: &app_db
-        - name: cdp-security-db
-          database:
-            instance_name: ${resources.database_instances.cdp_security_db.name}
-            database_name: ${var.lakebase_database}
-            permission: CAN_CONNECT_AND_CREATE
+      # Gives the app's service principal CAN_USE on the warehouse
+      resources: &app_resources
+        - name: sql-warehouse
+          sql_warehouse:
+            id: ${var.warehouse_id}
+            permission: CAN_USE
       # The on-behalf-of token is used ONLY to read the caller's own group memberships. That needs only
       # the default user-authorization scopes (iam.current-user:read, iam.access-control:read), which
       # Databricks adds itself and rejects if listed in user_api_scopes.
@@ -51,36 +53,12 @@ resources:
 
     cdp_security_admin_app:
       name: cdp-security-admin-${var.env_code}
-      description: Catalog admin - register data products, projects, AI assets and groups; operations; audit
+      description: Catalog admin - register workspaces, data products and groups; record manual access changes; audit
       source_code_path: ../build/admin_app   # copy of ../app made by the preinit script
       config:
         command: ["streamlit", "run", "admin_app.py"]
-        env:
-          - name: CDP_SECURITY_ENV
-            value: ${var.env_code}
-          - name: LAKEBASE_INSTANCE_NAME
-            value: ${var.lakebase_instance}
-          - name: CDP_SECURITY_DRY_RUN
-            value: ${var.dry_run}
-          - name: CDP_SECURITY_ADMIN_GROUP
-            value: ${var.admin_group}
-          - name: CDP_SECURITY_SECURITY_GROUP
-            value: ${var.security_group}
-          - name: CDP_SECURITY_AUDITOR_GROUP
-            value: ${var.auditor_group}
-          - name: CDP_SECURITY_BREAK_GLASS_GROUP
-            value: ${var.break_glass_group}
-          - name: CDP_SECURITY_SECURITY_MAILBOX
-            value: ${var.security_mailbox}
-          - name: CDP_SECURITY_ADMIN_MAILBOX
-            value: ${var.admin_mailbox}
-          - name: CDP_SECURITY_APP_URL
-            value: ${var.app_url}
-          - name: CDP_SECURITY_ADMIN_APP_URL
-            value: ${var.admin_app_url}
-          - name: CDP_SECURITY_PROVISIONING_JOB_ID
-            value: ${var.provisioning_job_id}
-      resources: *app_db
+        env: *app_env
+      resources: *app_resources
       permissions:            # nobody else can even open it
         - group_name: ${var.admin_group}
           level: CAN_MANAGE

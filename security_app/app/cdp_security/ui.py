@@ -15,9 +15,10 @@ log = logging.getLogger("cdp_security.ui")
 
 CLASS_COLOURS = {"GENERAL": "green", "CONFIDENTIAL": "orange", "RESTRICTED": "red"}
 STATUS_COLOURS = {"ACTIVE": "green", "FULFILLED": "green", "APPROVED": "blue", "PENDING_APPROVAL": "orange",
-                  "PROVISIONING": "blue", "PENDING_PROVISION": "blue", "PENDING_REVOKE": "orange",
-                  "REJECTED": "red", "PROVISIONING_FAILED": "red", "FAILED": "red", "CANCELLED": "gray",
+                  "PENDING_PROVISION": "blue", "PENDING_REVOKE": "orange", "REJECTED": "red", "CANCELLED": "gray",
                   "EXPIRED": "gray", "REVOKED": "gray"}
+STATUS_LABELS = {"APPROVED": "approved - awaiting admin", "PENDING_PROVISION": "awaiting admin to add",
+                 "PENDING_REVOKE": "awaiting admin to remove"}
 
 
 def user() -> CurrentUser:
@@ -37,11 +38,18 @@ def classification(code: str) -> str:
 
 
 def status(code: str) -> str:
-    return f":{STATUS_COLOURS.get(code, 'gray')}[{code.replace('_', ' ').lower()}]"
+    text = STATUS_LABELS.get(code, code.replace("_", " ").lower())
+    return f":{STATUS_COLOURS.get(code, 'gray')}[{text}]"
 
 
 def flash(message: str) -> None:
     st.session_state["_flash"] = message
+
+
+def flash_result(row: dict, key: str, template: str) -> dict:
+    """Flash a message naming a generated identifier, e.g. "Workspace WS-0003 registered."."""
+    flash(template.format(row[key]))
+    return row
 
 
 def show_flash() -> None:
@@ -90,7 +98,7 @@ def sidebar(user: CurrentUser, app_title: str, other_app: tuple[str, str | None]
         st.markdown(f"### {app_title}")
         if settings.env != "prd":
             st.warning(f"{settings.env.upper()} environment"
-                       + (" - dry run, no real changes" if settings.dry_run else ""))
+                       + (" - notifications are logged, not sent" if settings.dry_run else ""))
         st.markdown(f"**{user.display_name}**")
         st.caption(user.email)
         if user.app_roles:

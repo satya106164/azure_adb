@@ -5,14 +5,14 @@ from cdp_security import queries, service, ui
 user = ui.user()
 st.title("Access reviews")
 ui.show_flash()
-st.caption("Confirm who still needs access. Anything not reviewed by the due date is removed automatically.")
+st.caption("Confirm who still needs access. Anything not reviewed by the due date is listed for removal.")
 
 items = queries.recert_items_for(user.email)
 if not items:
     st.info("You have no access reviews due.")
     st.stop()
 
-rows = [{"item_id": str(i["item_id"]), "Person": i["user_email"], "Access": i["group_name"],
+rows = [{"item_id": i["item_id"], "Person": i["user_email"], "Access": f"{i['data_product_name']} ({i['group_name']})",
          "Classification": i["classification_code"], "Ends": i["valid_to"].date(),
          "Last reviewed": i["last_recertified_at"].date() if i["last_recertified_at"] else None,
          "Due": i["due_at"].date(), "Decision": "Not reviewed", "Comment": ""} for i in items]

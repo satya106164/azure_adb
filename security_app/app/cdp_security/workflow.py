@@ -40,28 +40,23 @@ REQUEST_TRANSITIONS: dict[tuple[RequestStatus, str], RequestStatus] = {
     (RS.PENDING_APPROVAL, "reject"): RS.REJECTED,
     (RS.PENDING_APPROVAL, "timeout"): RS.REJECTED,
     (RS.PENDING_APPROVAL, "cancel"): RS.CANCELLED,
-    (RS.APPROVED, "start_provisioning"): RS.PROVISIONING,
-    (RS.APPROVED, "extended"): RS.FULFILLED,          # EXTEND requests need no provisioning
-    (RS.PROVISIONING, "provisioned"): RS.FULFILLED,
-    (RS.PROVISIONING, "provision_failed"): RS.PROVISIONING_FAILED,
-    (RS.PROVISIONING_FAILED, "retry"): RS.APPROVED,
-    (RS.PROVISIONING_FAILED, "cancel"): RS.CANCELLED,
+    (RS.APPROVED, "extended"): RS.FULFILLED,          # EXTEND requests need no change to the group
+    (RS.APPROVED, "granted"): RS.FULFILLED,           # an admin added the member by hand
+    (RS.APPROVED, "withdraw"): RS.CANCELLED,          # group retired / person left before it was done
 }
 
 # Who may raise each event
 REQUEST_EVENT_ACTORS: dict[str, frozenset[str]] = {
     "submit": frozenset({"requester"}),
     "break_glass": frozenset({"break_glass"}),
-    "cancel": frozenset({"requester", "admin"}),
+    "cancel": frozenset({"requester", "admin", "system"}),  # system: request became pointless
     "approve_stage": frozenset({"approver"}),
     "approve_final": frozenset({"approver"}),
     "reject": frozenset({"approver"}),
     "timeout": frozenset({"system"}),
-    "start_provisioning": frozenset({"system"}),
     "extended": frozenset({"system", "approver"}),
-    "provisioned": frozenset({"system"}),
-    "provision_failed": frozenset({"system"}),
-    "retry": frozenset({"admin"}),
+    "granted": frozenset({"admin"}),
+    "withdraw": frozenset({"admin", "system"}),
 }
 
 TERMINAL_REQUEST_STATES = frozenset({RS.FULFILLED, RS.REJECTED, RS.CANCELLED})
@@ -83,10 +78,10 @@ def next_request_status(current: RequestStatus | str, event: str, actor_kind: st
 # ---------------------------------------------------------------------------
 # Grant state machine
 # ---------------------------------------------------------------------------
+# The app never changes a group itself: an admin does it by hand and marks it done ("granted", "removed").
 GRANT_TRANSITIONS: dict[tuple[GrantStatus, str], GrantStatus] = {
-    (GS.PENDING_PROVISION, "provisioned"): GS.ACTIVE,
-    (GS.PENDING_PROVISION, "provision_failed"): GS.FAILED,
-    (GS.FAILED, "retry"): GS.PENDING_PROVISION,
+    (GS.PENDING_PROVISION, "granted"): GS.ACTIVE,
+    (GS.PENDING_PROVISION, "withdraw"): GS.REVOKED,   # never added, so nothing to remove
     (GS.ACTIVE, "extend"): GS.ACTIVE,
     (GS.ACTIVE, "recertify"): GS.ACTIVE,
     (GS.ACTIVE, "revoke"): GS.PENDING_REVOKE,
@@ -220,20 +215,14 @@ def add_business_hours(start: datetime, hours: int, holidays: frozenset[date] = 
     return cur.astimezone(timezone.utc)
 
 
-def effective_valid_to(start: datetime, requested_days: int | None, max_days: int,
-                       project_end: date | None = None, request_type: RequestType | str = RequestType.GRANT,
-                       break_glass_hours: int = 4) -> datetime:
-    """Grant end: min(requested, classification max, project end). Break-glass is hours, not days."""
+def effective_valid_to(start: datetime, requested_days: int | None, default_days: int,
+                       request_type: RequestType | str = RequestType.GRANT, break_glass_hours: int = 4) -> datetime:
+    """Grant end: the requested number of days (no upper limit; default_days if none was given).
+    Break-glass is hours, not days."""
     if RequestType(request_type) == RequestType.BREAK_GLASS:
         return start + timedelta(hours=break_glass_hours)
-    days = max_days if not requested_days else min(int(requested_days), max_days)
-    end = start + timedelta(days=days)
-    if project_end is not None:
-        project_cut = datetime.combine(project_end, time(23, 59, 59), tzinfo=timezone.utc)
-        end = min(end, project_cut)
-    if end <= start:
-        raise TransitionError("The project has ended; access cannot be granted for it.")
-    return end
+    days = int(requested_days) if requested_days else default_days
+    return start + timedelta(days=max(days, 1))
 
 
 def recert_due(last_attested: datetime, interval_days: int, window_days: int, now: datetime) -> bool:
@@ -241,11 +230,10 @@ def recert_due(last_attested: datetime, interval_days: int, window_days: int, no
     return last_attested + timedelta(days=interval_days) - timedelta(days=window_days) <= now
 
 
-def choose_reviewer(grantee: str, owners: Iterable[str], stewards: Iterable[str],
-                    group_owner: str | None) -> str | None:
-    """Pick a recertification reviewer who is not the grantee (owner > steward > group owner)."""
+def choose_reviewer(grantee: str, owners: Iterable[str], stewards: Iterable[str]) -> str | None:
+    """Pick a recertification reviewer who is not the grantee (data owner, then steward)."""
     g = _norm(grantee)
-    for pool in (sorted(owners), sorted(stewards), [group_owner] if group_owner else []):
+    for pool in (sorted(owners), sorted(stewards)):
         for candidate in pool:
             if _norm(candidate) and _norm(candidate) != g:
                 return _norm(candidate)

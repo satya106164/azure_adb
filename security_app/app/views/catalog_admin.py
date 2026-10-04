@@ -1,153 +1,176 @@
 import streamlit as st
 
-from cdp_security import queries, service, templates, ucsql, ui
+from cdp_security import naming, queries, service, ui
+from cdp_security.config import get_settings
 from cdp_security.models import AppRole
 
 user = ui.require(AppRole.ADMIN)
+settings = get_settings()
 st.title("Catalog admin")
 ui.show_flash()
-st.caption("Register what is governed and who owns it. Approval routes and classification limits change "
-           "only through a reviewed database migration.")
+st.caption("Register workspaces, data products and their access groups. Identifiers (WS-, DP-, GRP-) are "
+           "generated for you. Approval routes and classification limits change only through a reviewed "
+           "database migration.")
 
-CLASSES = ["GENERAL", "CONFIDENTIAL", "RESTRICTED"]
+CLASSES = list(service.CLASSIFICATIONS)
+WS_TYPES = list(service.WORKSPACE_TYPES)
+DP_TYPES = list(service.DATA_PRODUCT_TYPES)
+ENVS = list(service.ENVIRONMENTS)
 ws_rows = queries.workspaces()
 dp_rows = queries.data_products()
+ws_codes = [None] + [w["workspace_code"] for w in ws_rows]
+ws_names = {w["workspace_code"]: w["name"] for w in ws_rows}
 
 
-def ws_label(w):
-    return "None" if w is None else f"{w['name']} ({w['workspace_type'].lower()}, {w['environment']})"
+def ws_label(code):
+    return "None" if code is None else f"{code} {ws_names.get(code, '')}"
 
 
-tabs = st.tabs(["Workspaces", "Data products", "Projects", "AI and BI assets", "Groups and entitlements",
-                "Owners and roles", "Rules"])
+def dp_label(row: dict) -> str:
+    return f"{row['data_product_code']} {row['name']} ({service.DATA_PRODUCT_TYPES[row['data_product_type']]})"
 
-with tabs[0]:
-    ui.table(ws_rows, ["name", "workspace_type", "environment", "host_url", "is_active"])
-    with st.form("ws"):
+
+def pick(label: str, rows: list[dict], key: str, fmt):
+    """Select an existing row to edit, or None for 'register new'."""
+    return st.selectbox(label, [None] + rows, key=key,
+                        format_func=lambda r: "Register a new one" if r is None else fmt(r))
+
+
+tab_ws, tab_dp, tab_grp = st.tabs(["Workspaces", "Data products", "Groups"])
+
+# ---- Workspaces ----------------------------------------------------------------------
+with tab_ws:
+    ui.table([{**r, "workspace_type": service.WORKSPACE_TYPES.get(r["workspace_type"], r["workspace_type"])}
+              for r in ws_rows],
+             ["workspace_code", "name", "workspace_type", "environment", "host_url", "databricks_workspace_id",
+              "is_active"])
+    w = pick("Edit or register", ws_rows, "ws-pick", lambda r: f"{r['workspace_code']} {r['name']}")
+    with st.form(f"ws-{w['workspace_code'] if w else 'new'}"):
+        st.markdown(f"**{'Edit ' + w['workspace_code'] if w else 'Register a workspace'}**")
         c1, c2 = st.columns(2)
-        name = c1.text_input("Name", placeholder="dbanalytics-prd")
-        wtype = c2.selectbox("Type", ["INGESTION", "PROJECT", "DBANALYTICS", "ANALYTICS_PBI", "MLOPS"])
-        host = c1.text_input("Workspace URL", placeholder="https://adb-1234567890123456.7.azuredatabricks.net")
-        env = c2.selectbox("Environment", ["dev", "tst", "prd"])
-        wid = c1.number_input("Workspace id (optional)", min_value=0, step=1, value=0)
-        if st.form_submit_button("Register workspace"):
-            ui.act(lambda: service.register_workspace(user, name=name, workspace_type=wtype, host_url=host,
-                                                      environment=env, databricks_workspace_id=wid or None),
-                   f"Workspace {name} registered.")
+        name = c1.text_input("Name", value=w["name"] if w else "", placeholder="analytics-prd")
+        wtype = c2.selectbox("Type", WS_TYPES, format_func=service.WORKSPACE_TYPES.get,
+                             index=WS_TYPES.index(w["workspace_type"]) if w and w["workspace_type"] in WS_TYPES
+                             else 0)
+        host = c1.text_input("Workspace URL", value=w["host_url"] if w else "",
+                             placeholder="https://adb-1234567890123456.7.azuredatabricks.net",
+                             help="The workspace id is read from the URL.")
+        env = c2.selectbox("Environment", ENVS, index=ENVS.index(w["environment"]) if w else 0)
+        active = c2.checkbox("Active", value=w["is_active"] if w else True, disabled=w is None)
+        if st.form_submit_button("Save changes" if w else "Register workspace", type="primary"):
+            if w:
+                ui.act(lambda: service.update_workspace(user, w["workspace_code"], name=name, workspace_type=wtype,
+                                                        host_url=host, environment=env, is_active=active),
+                       f"Workspace {w['workspace_code']} saved.")
+            else:
+                ui.act(lambda: ui.flash_result(service.register_workspace(
+                    user, name=name, workspace_type=wtype, host_url=host, environment=env),
+                    "workspace_code", "Workspace {} registered."))
 
-with tabs[1]:
-    ui.table(dp_rows, ["code", "name", "catalog_name", "schema_name", "classification_code", "lifecycle_status"])
-    with st.form("dp"):
+# ---- Data products -----------------------------------------------------------------
+with tab_dp:
+    ui.table([{**r, "data_product_type": service.DATA_PRODUCT_TYPES[r["data_product_type"]]} for r in dp_rows],
+             ["data_product_code", "name", "data_product_type", "project_name", "catalog_name", "schema_name",
+              "classification_code", "owner_email", "steward_email", "workspace_name", "lifecycle_status"])
+    d = pick("Edit or register", dp_rows, "dp-pick", dp_label)
+    with st.form(f"dp-{d['data_product_code'] if d else 'new'}"):
+        st.markdown(f"**{'Edit ' + d['data_product_code'] if d else 'Register a data product'}**")
         c1, c2 = st.columns(2)
-        code = c1.text_input("Code", placeholder="member_contributions")
-        name = c2.text_input("Name", placeholder="Member contributions")
-        desc = st.text_area("Description")
-        catalog = c1.text_input("Catalog", value="dbanalytics")
-        schema = c2.text_input("Schema (defaults to the code)")
-        cls = c1.selectbox("Classification", CLASSES)
-        home = c2.selectbox("Home workspace", [None] + ws_rows, format_func=ws_label)
-        owner = c1.text_input("Data owner email")
-        steward = c2.text_input("Data steward email")
-        lgs = st.multiselect("Logical groups", [g["logical_group_code"] for g in queries.logical_groups()])
-        create = st.checkbox("Create read and write groups with default grants", value=True)
-        if st.form_submit_button("Register data product"):
-            ui.act(lambda: service.register_data_product(
-                user, code=code, name=name, description=desc, catalog=catalog, schema=schema or code,
-                classification_code=cls, owner_email=owner, steward_email=steward,
-                home_workspace_id=home["workspace_id"] if home else None, logical_groups=lgs, create_groups=create),
-                f"Data product {code} registered.")
+        name = c1.text_input("Name", value=d["name"] if d else "", placeholder="Member contributions")
+        dtype = c2.selectbox("Type", DP_TYPES, format_func=service.DATA_PRODUCT_TYPES.get,
+                             index=DP_TYPES.index(d["data_product_type"]) if d else 0)
+        desc = st.text_area("Description", value=(d["description"] or "") if d else "")
+        project = c1.text_input("Project (optional)", value=(d["project_name"] or "") if d else "")
+        cls = c2.selectbox("Classification", CLASSES, index=CLASSES.index(d["classification_code"]) if d else 0)
+        catalog = c1.text_input("Catalog", value=(d["catalog_name"] or "") if d else "",
+                                help="Required for the Schema type; optional for the others.")
+        schema = c2.text_input("Schema", value=(d["schema_name"] or "") if d else "", placeholder="member_contributions",
+                               help="Required for the Schema type; optional for the others.")
+        owner = c1.text_input("Data owner email", value=d["owner_email"] if d else "")
+        steward = c2.text_input("Steward email", value=d["steward_email"] if d else "")
+        home = c1.selectbox("Home workspace", ws_codes, format_func=ws_label,
+                            index=ws_codes.index(d["home_workspace_code"]) if d and d["home_workspace_code"]
+                            in ws_codes else 0)
+        status = c2.selectbox("Status", ["ACTIVE", "RETIRED"], disabled=d is None,
+                              index=["ACTIVE", "RETIRED"].index(d["lifecycle_status"]) if d else 0,
+                              help="Retired data products take no new requests or groups. Retire their groups "
+                                   "to remove existing access.")
+        if st.form_submit_button("Save changes" if d else "Register data product", type="primary"):
+            values = dict(name=name, description=desc, data_product_type=dtype, project=project, catalog=catalog,
+                          schema=schema, classification_code=cls, owner_email=owner, steward_email=steward,
+                          home_workspace_code=home)
+            if d:
+                ui.act(lambda: service.update_data_product(user, d["data_product_code"], lifecycle_status=status,
+                                                           **values), f"Data product {d['data_product_code']} saved.")
+            else:
+                ui.act(lambda: ui.flash_result(service.register_data_product(user, **values), "data_product_code",
+                                               "Data product {} registered. Add its access group on the Groups tab."))
 
-with tabs[2]:
-    projects = queries.projects()
-    ui.table(projects, ["code", "name", "sponsor_email", "status", "start_date", "end_date"])
-    with st.form("project"):
-        c1, c2 = st.columns(2)
-        code = c1.text_input("Code", placeholder="contribution_forecast_2026")
-        name = c2.text_input("Name")
-        desc = st.text_area("Description", key="pdesc")
-        sponsor = c1.text_input("Sponsor email")
-        ws = c2.selectbox("Project workspace", [None] + ws_rows, format_func=ws_label)
-        end = c1.date_input("End date", value=None)
-        create = c2.checkbox("Create a contributors group", value=True)
-        if st.form_submit_button("Register project"):
-            ui.act(lambda: service.register_project(user, code=code, name=name, description=desc,
-                                                    sponsor_email=sponsor,
-                                                    workspace_id=ws["workspace_id"] if ws else None,
-                                                    end_date=end, create_group=create),
-                   f"Project {code} registered.")
-    st.markdown("**Data products a project may use**")
-    ui.table(queries.project_links())
-    with st.form("link"):
-        c1, c2 = st.columns(2)
-        p = c1.selectbox("Project", projects, format_func=lambda r: r["code"])
-        d = c2.selectbox("Data product", dp_rows, format_func=lambda r: r["code"])
-        why = st.text_input("Why does the project need it?")
-        if st.form_submit_button("Link"):
-            ui.act(lambda: service.link_project_data_product(user, p["project_id"], d["data_product_id"], why),
-                   "Linked.")
 
-with tabs[3]:
-    asset_rows = queries.assets()
-    ui.table(asset_rows, ["asset_type", "name", "external_id", "workspace_name", "classification_code", "is_active"])
-    with st.form("asset"):
-        c1, c2 = st.columns(2)
-        atype = c1.selectbox("Type", list(templates.ASSET_PRIVILEGES))
-        name = c2.text_input("Name", key="aname")
-        ext = c1.text_input("External id", help="Genie space id, endpoint name, dashboard id, Power BI workspace GUID, "
-                                                "or '<workspace GUID>/<dataset GUID>' for a semantic model")
-        ws = c2.selectbox("Databricks workspace (not for Power BI)", [None] + ws_rows, format_func=ws_label)
-        dp = c1.selectbox("Data product", [None] + dp_rows, format_func=lambda r: "None" if r is None else r["code"])
-        cls = c2.selectbox("Classification", CLASSES, key="acls")
-        if st.form_submit_button("Register asset"):
-            ui.act(lambda: service.register_asset(user, asset_type=atype, name=name, external_id=ext,
-                                                  workspace_id=ws["workspace_id"] if ws else None,
-                                                  data_product_id=dp["data_product_id"] if dp else None,
-                                                  classification_code=cls), f"Asset {name} registered.")
-    st.markdown("**AI and Genie use cases** - each gets a -user and an -admin group")
-    ui.table(queries.ai_use_cases(), ["code", "name", "data_product_code", "classification_code", "status"])
-    with st.form("ai"):
-        c1, c2 = st.columns(2)
-        code = c1.text_input("Code", key="aicode", placeholder="member_contributions_genie")
-        name = c2.text_input("Name", key="ainame")
-        desc = st.text_area("Description", key="aidesc")
-        dp = c1.selectbox("Data product", dp_rows, format_func=lambda r: r["code"], key="aidp")
-        owner = c2.text_input("Use case owner email")
-        picks = st.multiselect("Assets", asset_rows, format_func=lambda a: f"{a['asset_type']}: {a['name']}")
-        read = st.checkbox("Also grant read on the data product (needed for Genie answers)", value=True)
-        if st.form_submit_button("Register AI use case"):
-            ui.act(lambda: service.register_ai_use_case(
-                user, code=code, name=name, description=desc, data_product_id=dp["data_product_id"],
-                asset_ids=[a["asset_id"] for a in picks], owner_email=owner, include_data_product_read=read),
-                f"AI use case {code} registered.")
+# ---- Groups ----------------------------------------------------------------------------
+def group_form(g: dict | None, dps: list[dict]) -> None:
+    """Register (g is None) or edit a group. The checks must pass with these exact values before saving."""
+    key = g["group_code"] if g else "new"
+    c1, c2 = st.columns(2)
+    current = next((i for i, r in enumerate(dps) if g and r["data_product_code"] == g["data_product_code"]), 0)
+    dp = c1.selectbox("Data product", dps, index=current, key=f"grp-dp-{key}", format_func=dp_label)
+    default_name = g["group_name"] if g else naming.suggest_group_name(settings.env, dp["name"])
+    gname = c2.text_input("Group name (as it is in Entra ID)", value=default_name, key=f"grp-name-{key}-"
+                          + ("" if g else dp["data_product_code"]))
+    desc = c1.text_input("Description (optional)", value=(g["description"] or "") if g else "", key=f"grp-desc-{key}")
+    requestable = c2.checkbox("Open for self-service requests", value=g["requestable"] if g else True,
+                              key=f"grp-req-{key}")
+    values = (gname.strip(), dp["data_product_code"])
+    state_key = f"grp-checked-{key}"
+    a, b, _ = st.columns([1, 1, 3])
+    if a.button("Validate", key=f"grp-validate-{key}"):
+        st.session_state[state_key] = (values, service.check_group(
+            group_name=gname, data_product_code=dp["data_product_code"], group_code=g["group_code"] if g else None))
+    checked = st.session_state.get(state_key)
+    passed = bool(checked and checked[0] == values and all(c["ok"] for c in checked[1]))
+    if checked and checked[0] == values:
+        ui.table([{"Check": c["check"], "Result": "Passed" if c["ok"] else "Failed", "Detail": c["detail"]}
+                  for c in checked[1]])
+    else:
+        st.caption("Validate the group before saving.")
+    if b.button("Save changes" if g else "Register group", type="primary", disabled=not passed,
+                key=f"grp-save-{key}"):
+        st.session_state.pop(state_key, None)
+        if g:
+            ui.act(lambda: service.update_group(user, g["group_code"], group_name=gname,
+                                                data_product_code=dp["data_product_code"], description=desc,
+                                                requestable=requestable), f"Group {g['group_code']} saved.")
+        else:
+            ui.act(lambda: ui.flash_result(service.register_group(
+                user, group_name=gname, data_product_code=dp["data_product_code"], description=desc,
+                requestable=requestable), "group_code", "Group {} registered."))
 
-with tabs[4]:
+
+with tab_grp:
     groups = queries.groups()
-    ui.table(groups, ["group_name", "status", "purpose", "privilege_level", "classification_code", "requestable",
-                      "entra_object_id", "owner_email"])
-    if groups:
-        g = st.selectbox("Group", groups, format_func=lambda r: f"{r['group_name']} ({r['status'].lower()})")
-        ents = queries.entitlements(g["access_group_id"])
-        ui.table(ents, ["target_type", "target", "privilege", "desired_state", "apply_status", "last_applied_at",
-                        "last_error"])
-        c1, c2 = st.columns(2)
-        with c1.form("ent-uc"):
-            st.markdown("Add a Unity Catalog grant")
-            stype = st.selectbox("Securable type", list(ucsql.ALLOWED_PRIVILEGES))
-            fname = st.text_input("Full name", placeholder="dbanalytics.member_contributions")
-            priv = st.selectbox("Privilege", sorted(set().union(*ucsql.ALLOWED_PRIVILEGES.values())))
-            if st.form_submit_button("Add grant"):
-                ui.act(lambda: service.add_entitlement(user, g["access_group_id"], priv, securable_type=stype,
-                                                       securable_full_name=fname), "Entitlement added.")
-        with c2.form("ent-asset"):
-            st.markdown("Add an asset permission")
-            a = st.selectbox("Asset", queries.assets(), format_func=lambda r: f"{r['asset_type']}: {r['name']}")
-            apriv = st.selectbox("Permission", sorted(set().union(*templates.ASSET_PRIVILEGES.values())))
-            if st.form_submit_button("Add permission"):
-                ui.act(lambda: service.add_entitlement(user, g["access_group_id"], apriv, asset_id=a["asset_id"]),
-                       "Entitlement added.")
-        members = queries.group_members(g["access_group_id"])
+    ui.table([{**r, "data_product_type": service.DATA_PRODUCT_TYPES[r["data_product_type"]]} for r in groups],
+             ["group_code", "group_name", "data_product_code", "data_product_name", "data_product_type",
+              "classification_code", "status", "requestable"])
+    st.caption("Groups are created in Entra ID by the identity team. Register each one here and link it to its "
+               "data product; give the group its permissions on the dashboard, report, agent, app or schema "
+               "yourself. The app records who asked, who approved, and who added or removed each member.")
+    g = pick("Edit or register", groups, "grp-pick", lambda r: f"{r['group_code']} {r['group_name']}")
+    active_dps = [r for r in dp_rows if r["lifecycle_status"] == "ACTIVE"]
+    if g is None:
+        st.markdown("**Register a group**")
+        if active_dps:
+            group_form(None, active_dps)
+        else:
+            st.info("Register a data product first.")
+    else:
+        st.markdown(f"**{g['group_code']} {g['group_name']}** - {g['status'].lower()}, data product "
+                    f"{g['data_product_code']} {g['data_product_name']}")
+        if g["status"] == "ACTIVE":
+            group_form(g, dp_rows)  # all data products, so a retired one shows up (and fails validation)
+        members = queries.group_members(g["group_code"])
         st.markdown(f"**Members ({len(members)})**")
-        ui.table(members, ["user_email", "status", "valid_to", "last_recertified_at", "is_break_glass", "request_ref"])
+        ui.table(members, ["user_email", "status", "valid_to", "provisioned_by", "last_recertified_at",
+                           "is_break_glass", "request_ref"])
         active_members = [m for m in members if m["status"] == "ACTIVE"]
         if active_members:
             with st.form("member-revoke"):
@@ -155,60 +178,9 @@ with tabs[4]:
                 why = st.text_input("Reason", key="member-why")
                 if st.form_submit_button("Remove member"):
                     ui.act(lambda: service.revoke_grant(user, m["grant_id"], why or None),
-                           "Member will be removed within the next provisioning run.")
-        live = [e for e in ents if e["desired_state"] == "PRESENT"]
-        if live:
-            e = st.selectbox("Remove an entitlement", [None] + live,
-                             format_func=lambda r: "Choose" if r is None else f"{r['privilege']} on {r['target']}")
-            if e and st.button("Remove entitlement"):
-                ui.act(lambda: service.remove_entitlement(user, e["entitlement_id"]), "Entitlement will be removed.")
-        if g["status"] == "PLANNED":
-            with st.form("objid"):
-                st.markdown("Group created by the identity team? Record its Entra object id to activate it.")
-                oid = st.text_input("Entra object id")
-                if st.form_submit_button("Activate group"):
-                    ui.act(lambda: service.set_group_object_id(user, g["access_group_id"], oid), "Group activated.")
+                           "Listed for removal on the Fulfilment page.")
         if g["status"] == "ACTIVE":
             with st.form("retire"):
                 reason = st.text_input("Reason for retiring this group")
-                if st.form_submit_button("Retire group (removes all members and grants)"):
-                    ui.act(lambda: service.retire_group(user, g["access_group_id"], reason), "Group is being retired.")
-
-with tabs[5]:
-    owns = queries.ownerships()
-    ui.table(owns, ["object_kind", "object", "role", "email", "valid_from"])
-    with st.form("own"):
-        c1, c2 = st.columns(2)
-        kind = c1.selectbox("Object type", ["DATA_PRODUCT", "PROJECT", "AI_USE_CASE", "ACCESS_GROUP", "ASSET"])
-        choices = {
-            "DATA_PRODUCT": [(r["data_product_id"], r["code"]) for r in dp_rows],
-            "PROJECT": [(r["project_id"], r["code"]) for r in queries.projects()],
-            "AI_USE_CASE": [(r["ai_use_case_id"], r["code"]) for r in queries.ai_use_cases()],
-            "ACCESS_GROUP": [(r["access_group_id"], r["group_name"]) for r in queries.groups()],
-            "ASSET": [(r["asset_id"], r["name"]) for r in queries.assets()],
-        }[kind]
-        obj = c2.selectbox("Object", choices, format_func=lambda x: x[1])
-        role = c1.selectbox("Role", ["DATA_OWNER", "STEWARD", "TECHNICAL_OWNER"])
-        email = c2.text_input("Person's email")
-        if st.form_submit_button("Assign") and obj:
-            ui.act(lambda: service.assign_ownership(user, kind, obj[0], email, role), "Assigned.")
-    if owns:
-        o = st.selectbox("End an assignment", [None] + owns,
-                         format_func=lambda r: "Choose" if r is None else f"{r['object']} {r['role']} {r['email']}")
-        if o and st.button("End assignment"):
-            ui.act(lambda: service.end_ownership(user, o["ownership_id"]), "Assignment ended.")
-    st.markdown("**App roles (fallback to Entra groups)**")
-    ui.table(queries.app_role_members())
-    with st.form("roles"):
-        c1, c2, c3 = st.columns(3)
-        email = c1.text_input("Email", key="roleemail")
-        role = c2.selectbox("Role", [r.value for r in AppRole])
-        grant = c3.radio("Action", ["Grant", "Remove"], horizontal=True)
-        if st.form_submit_button("Save role"):
-            ui.act(lambda: service.set_app_role(user, email, AppRole(role), grant == "Grant"), "Role saved.")
-
-with tabs[6]:
-    st.markdown("**Classifications**")
-    ui.table(queries.classifications())
-    st.markdown("**Approval route per classification**")
-    ui.table(queries.approval_rules())
+                if st.form_submit_button("Retire group (lists every member for removal)"):
+                    ui.act(lambda: service.retire_group(user, g["group_code"], reason), "Group is being retired.")

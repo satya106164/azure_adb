@@ -28,8 +28,13 @@ def test_happy_path_request_transitions():
     s = wf.next_request_status(RequestStatus.DRAFT, "submit", "requester")
     s = wf.next_request_status(s, "approve_stage", "approver")
     s = wf.next_request_status(s, "approve_final", "approver")
-    s = wf.next_request_status(s, "start_provisioning", "system")
-    assert wf.next_request_status(s, "provisioned", "system") == RequestStatus.FULFILLED
+    assert wf.next_request_status(s, "granted", "admin") == RequestStatus.FULFILLED
+
+
+def test_only_an_admin_records_a_manual_grant():
+    for actor in ("system", "approver", "requester"):
+        with pytest.raises(wf.TransitionError):
+            wf.next_request_status(RequestStatus.APPROVED, "granted", actor)
 
 
 def test_requester_cannot_approve_event():
@@ -45,6 +50,13 @@ def test_cannot_cancel_after_approval():
 def test_terminal_states_have_no_exits():
     for state in wf.TERMINAL_REQUEST_STATES:
         assert not [k for k in wf.REQUEST_TRANSITIONS if k[0] == state]
+
+
+def test_grant_is_live_only_once_an_admin_marks_it():
+    assert wf.next_grant_status(GrantStatus.PENDING_PROVISION, "granted") == GrantStatus.ACTIVE
+    assert wf.next_grant_status(GrantStatus.PENDING_PROVISION, "withdraw") == GrantStatus.REVOKED
+    with pytest.raises(wf.TransitionError):
+        wf.next_grant_status(GrantStatus.ACTIVE, "granted")
 
 
 def test_grant_removal_outcome_depends_on_reason():
@@ -130,17 +142,11 @@ def test_business_hours_skip_holiday():
     assert due.date() == date(2026, 12, 29)
 
 
-def test_duration_capped_by_classification_and_project():
+def test_duration_is_what_was_requested():
     start = datetime(2026, 10, 1, tzinfo=timezone.utc)
-    assert wf.effective_valid_to(start, 500, 90) == start + timedelta(days=90)
-    end = wf.effective_valid_to(start, 90, 365, project_end=date(2026, 10, 31))
-    assert end.date() == date(2026, 10, 31)
-
-
-def test_duration_rejects_ended_project():
-    start = datetime(2026, 10, 1, tzinfo=timezone.utc)
-    with pytest.raises(wf.TransitionError):
-        wf.effective_valid_to(start, 30, 90, project_end=date(2026, 9, 1))
+    assert wf.effective_valid_to(start, 1185, 90) == start + timedelta(days=1185)  # no upper limit
+    assert wf.effective_valid_to(start, None, 180) == start + timedelta(days=180)
+    assert wf.effective_valid_to(start, 30, 365) == start + timedelta(days=30)
 
 
 def test_break_glass_duration_is_hours():
@@ -156,5 +162,9 @@ def test_recert_due_window():
 
 
 def test_reviewer_never_the_grantee():
-    assert wf.choose_reviewer("owner@x.com", {"owner@x.com"}, {"steward@x.com"}, None) == "steward@x.com"
-    assert wf.choose_reviewer("a@x.com", set(), set(), "a@x.com") is None
+    assert wf.choose_reviewer("owner@x.com", {"owner@x.com"}, {"steward@x.com"}) == "steward@x.com"
+    assert wf.choose_reviewer("a@x.com", {"a@x.com"}, set()) is None
+
+
+def test_system_can_close_a_pending_request():
+    assert wf.next_request_status(RequestStatus.PENDING_APPROVAL, "cancel", "system") == RequestStatus.CANCELLED
