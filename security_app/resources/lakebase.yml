@@ -5,6 +5,17 @@ resources:
       capacity: ${var.lakebase_capacity}
       enable_pg_native_login: false        # OAuth (Databricks identity) logins only
 
+  # The instance's primary read-write endpoint (created with it), taken over so its autoscaling
+  # range and scale-to-zero are set here rather than left at the platform defaults.
+  postgres_endpoints:
+    cdp_security_db_primary:
+      parent: projects/${resources.database_instances.cdp_security_db.name}/branches/production
+      endpoint_id: primary
+      endpoint_type: ENDPOINT_TYPE_READ_WRITE
+      replace_existing: true
+      autoscaling_limit_min_cu: ${var.lakebase_min_cu}
+      autoscaling_limit_max_cu: ${var.lakebase_max_cu}
+      suspend_timeout_duration: ${var.lakebase_suspend_timeout}
 
 # No database_catalogs resource: the bundle never creates a Unity Catalog catalog. The reporting ETL
 # reads Lakebase directly over Postgres, and the app data lives in the instance's built-in

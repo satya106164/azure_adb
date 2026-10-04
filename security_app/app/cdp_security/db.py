@@ -102,11 +102,15 @@ def get_pool() -> ConnectionPool:
                 host=_resolve_host(), port=settings.pg_port, dbname=settings.pg_database,
                 user=_resolve_user(), sslmode=settings.pg_sslmode, application_name="cdp_security",
             )
+            # min_size=0 + short max_idle: an idle app holds no connections, so the Lakebase
+            # endpoint can scale to zero (it suspends after a few idle minutes). The first query
+            # after an idle spell pays a reconnect and, if suspended, a compute resume.
             _pool = ConnectionPool(
                 conninfo=conninfo,
                 connection_class=_OAuthConnection,
-                min_size=1,
+                min_size=0,
                 max_size=settings.pool_max,
+                max_idle=60,
                 max_lifetime=35 * 60,
                 kwargs={"row_factory": dict_row, "options": f"-c search_path={settings.db_schema},public"},
                 open=True,

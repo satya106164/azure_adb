@@ -15,7 +15,7 @@ and Power BI. Built for a UK pensions business (FCA, UK GDPR).
 |---|---|---|
 | Data access app | `cdp-security-dev` | Streamlit app for everyone: request, approve, review, emergency access |
 | Catalog admin app | `cdp-security-admin-dev` | Streamlit app for admins, auditors, security |
-| Lakebase instance | `cdp-security-dev` | Managed PostgreSQL. App data: database `databricks_postgres`, schema `cdp_security` |
+| Lakebase instance | `cdp-security-dev` | Managed PostgreSQL. App data: database `databricks_postgres`, schema `cdp_security`. Serverless: autoscales and suspends when idle (the apps hold no idle connections) |
 | Job | `cdp_security-migrate-dev` | Creates / upgrades the database schema and the reporting tables |
 | Job | `cdp_security-provisioning-dev` | Every 15 min (paused in dev): applies approved access, expires grants |
 | Job | `cdp_security-daily-dev` | 06:30 daily (paused in dev): lifecycle, recertification, drift, reporting, notify |

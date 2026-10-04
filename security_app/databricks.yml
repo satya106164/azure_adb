@@ -31,6 +31,15 @@ variables:
     default: cdp-security-dev
   lakebase_capacity:
     default: CU_1
+  lakebase_min_cu:
+    description: Lakebase endpoint autoscaling floor in compute units (0.5 = smallest)
+    default: 0.5
+  lakebase_max_cu:
+    description: Lakebase endpoint autoscaling ceiling in compute units
+    default: 4
+  lakebase_suspend_timeout:
+    description: Idle time before the Lakebase endpoint scales to zero (60s to 604800s)
+    default: 120s
   lakebase_database:
     description: Postgres database in the Lakebase instance (the built-in one; nothing else creates databases)
     default: databricks_postgres

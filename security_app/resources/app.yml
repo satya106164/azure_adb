@@ -43,11 +43,12 @@ resources:
       # The on-behalf-of token is used ONLY to read the caller's own group memberships. That needs only
       # the default user-authorization scopes (iam.current-user:read, iam.access-control:read), which
       # Databricks adds itself and rejects if listed in user_api_scopes.
-      permissions:
-        - group_name: users
-          level: CAN_USE
-        - group_name: ${var.admin_group}
-          level: CAN_MANAGE
+      # App permissions are managed by hand in the workspace for now. Uncomment before tst/prd.
+      # permissions:
+      #   - group_name: users
+      #     level: CAN_USE
+      #   - group_name: ${var.admin_group}
+      #     level: CAN_MANAGE
 
     cdp_security_admin_app:
       name: cdp-security-admin-${var.env_code}
@@ -81,10 +82,11 @@ resources:
           - name: CDP_SECURITY_PROVISIONING_JOB_ID
             value: ${var.provisioning_job_id}
       resources: *app_db
-      permissions:            # nobody else can even open it
-        - group_name: ${var.admin_group}
-          level: CAN_MANAGE
-        - group_name: ${var.auditor_group}
-          level: CAN_USE
-        - group_name: ${var.security_group}
-          level: CAN_USE
+      # App permissions are managed by hand in the workspace for now. Uncomment before tst/prd.
+      # permissions:            # nobody else can even open it
+      #   - group_name: ${var.admin_group}
+      #     level: CAN_MANAGE
+      #   - group_name: ${var.auditor_group}
+      #     level: CAN_USE
+      #   - group_name: ${var.security_group}
+      #     level: CAN_USE
