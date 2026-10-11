@@ -1,8 +1,7 @@
-"""Microsoft Graph adapter: look up people (leavers / movers) and send email.
-It never changes groups or memberships; admins do that by hand.
+"""Microsoft Graph adapter: look up people (leavers / movers). Email goes through the Logic App
+(dispatch.py). It never changes groups or memberships; admins do that by hand.
 
-App registration needs application permissions (admin consented):
-  User.Read.All, plus Mail.Send (restricted with an application access policy to the sender mailbox).
+App registration needs the application permission User.Read.All (admin consented).
 """
 from __future__ import annotations
 
@@ -37,14 +36,3 @@ class EntraGraphProvider:
         resp = http("GET", f"{GRAPH}/users?$filter=mail eq '{self._q(email)}'&{select}", self.token)
         values = resp.json().get("value", [])
         return values[0] if len(values) == 1 else None
-
-    # ---- mail ----------------------------------------------------------------
-    def send_mail(self, sender: str, recipients: list[str], subject: str, body: str) -> None:
-        http("POST", f"{GRAPH}/users/{sender}/sendMail", self.token, json={
-            "message": {
-                "subject": subject,
-                "body": {"contentType": "Text", "content": body},
-                "toRecipients": [{"emailAddress": {"address": r}} for r in recipients],
-            },
-            "saveToSentItems": False,
-        })

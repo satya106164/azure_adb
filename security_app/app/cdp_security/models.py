@@ -13,7 +13,6 @@ class _StrEnum(str, Enum):
 class RequestType(_StrEnum):
     GRANT = "GRANT"
     EXTEND = "EXTEND"
-    BREAK_GLASS = "BREAK_GLASS"
 
 
 class RequestStatus(_StrEnum):
@@ -49,22 +48,16 @@ class RevokeReason(_StrEnum):
     RECERT_REVOKE = "RECERT_REVOKE"
     RECERT_NOT_ATTESTED = "RECERT_NOT_ATTESTED"
     LEAVER = "LEAVER"
-    POST_HOC_REJECTED = "POST_HOC_REJECTED"
     GROUP_RETIRED = "GROUP_RETIRED"
 
 
 class ApproverRole(_StrEnum):
-    DATA_OWNER = "DATA_OWNER"
-    STEWARD = "STEWARD"
-    SECURITY = "SECURITY"
+    APPROVER = "APPROVER"    # the data product's owner / approver or approver 2
 
 
 class AppRole(_StrEnum):
-    """Global roles, from Entra group membership. Data owner / steward are per data product."""
+    """Global roles, from Entra group membership. Approvers are per data product."""
     ADMIN = "ADMIN"
-    SECURITY = "SECURITY"
-    AUDITOR = "AUDITOR"
-    BREAK_GLASS = "BREAK_GLASS"
 
 
 @dataclass(frozen=True)

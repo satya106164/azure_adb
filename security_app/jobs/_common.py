@@ -21,9 +21,10 @@ def bootstrap(extra: list[tuple[str, dict]] | None = None) -> argparse.Namespace
     p.add_argument("--schema", required=True)
     p.add_argument("--secret-scope", default="cdp_security")
     p.add_argument("--dry-run", default="true")
-    p.add_argument("--security-mailbox", default="")
     p.add_argument("--admin-mailbox", default="")
     p.add_argument("--app-url", default="")
+    p.add_argument("--admin-app-url", default="")
+    p.add_argument("--recert-interval-days", default="365")
     for name, kwargs in extra or []:
         p.add_argument(name, **kwargs)
     args, _ = p.parse_known_args()
@@ -35,9 +36,10 @@ def bootstrap(extra: list[tuple[str, dict]] | None = None) -> argparse.Namespace
         "CDP_SECURITY_CATALOG": args.catalog,
         "CDP_SECURITY_SCHEMA": args.schema,
         "CDP_SECURITY_DRY_RUN": args.dry_run,
-        "CDP_SECURITY_SECURITY_MAILBOX": args.security_mailbox,
         "CDP_SECURITY_ADMIN_MAILBOX": args.admin_mailbox,
         "CDP_SECURITY_APP_URL": args.app_url,
+        "CDP_SECURITY_ADMIN_APP_URL": args.admin_app_url,
+        "CDP_SECURITY_RECERT_INTERVAL_DAYS": args.recert_interval_days,
     })
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     return args

@@ -5,7 +5,7 @@ admin app only records them, so a name is checked for shape, not existence.
 The suggested convention is
 
     grp-dbx-<env>-dp-<name>-read          e.g. grp-dbx-prd-dp-member_contributions-read
-    grp-dbx-<env>-app-cdp_security-<role> this app's own role groups (admin, security, auditor, breakglass)
+    grp-dbx-<env>-app-cdp_security-<role> this app's admin group (role: admin)
 """
 from __future__ import annotations
 

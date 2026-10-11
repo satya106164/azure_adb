@@ -3,23 +3,29 @@ import streamlit as st
 from cdp_security import queries, service, ui
 
 user = ui.user()
-st.title("Approvals")
-ui.show_flash()
+ui.page_header("Approvals", "approvals")
 
 tasks = service.tasks_for_user(user)
+# Approval emails link to ?request=SAR-...: show that request first
+wanted = st.query_params.get("request")
+if wanted:
+    if any(t["request_ref"] == wanted for t in tasks):
+        st.info(f"You were sent here for **{wanted}**. It is shown first.")
+        tasks = sorted(tasks, key=lambda t: t["request_ref"] != wanted)
+    else:
+        st.warning(f"**{wanted}** is not waiting for you: it has already been decided, or you are not one of "
+                   "its approvers.")
 if not tasks:
     st.info("Nothing is waiting for you.")
 for t in tasks:
     head = f"{t['request_ref']} - {service.access_label(t)} for {t['beneficiary_email']}"
+    if t["request_ref"] == wanted:
+        head = f":blue-background[{head}]"
     with st.container(border=True):
         st.markdown(f"**{head}**")
-        st.markdown(f"{ui.classification(t['classification_code'])} "
-                    + ("  :red[**Break-glass review**]" if t["is_post_hoc"] else
-                       f"stage {t['stage_no']} of {t['total_stages']} ({t['approver_role'].replace('_', ' ').lower()})")
-                    + f" - due {t['due_at']:%d %b %Y %H:%M} UTC" + (" :red[overdue]" if t["escalated_at"] else ""))
+        st.markdown(f"due {t['due_at']:%d %b %Y %H:%M} UTC" + (" :red[overdue]" if t["escalated_at"] else ""))
         c1, c2 = st.columns([2, 1])
-        c1.write(f"Requested by {t['requester_email']} - group {t['group_name']}"
-                 + (f", incident {t['incident_ref']}" if t["incident_ref"] else ""))
+        c1.write(f"Requested by {t['requester_email']} - group {t['group_name']}")
         c1.write(f"Justification: {t['justification']}")
         if t["requested_duration_days"]:
             c1.caption(f"Requested for {t['requested_duration_days']} days")

@@ -4,11 +4,7 @@ from cdp_security import queries, service, ui
 from cdp_security.models import AppRole
 
 user = ui.require(AppRole.ADMIN)
-st.title("Fulfilment")
-ui.show_flash()
-st.caption("The app never changes a group. Add or remove the person in Entra ID (or Databricks) yourself, then "
-           "record it here: who did it and when goes into the audit trail and the reports. You cannot record "
-           "access given to yourself.")
+ui.page_header("Fulfilment", "fulfilment")
 
 
 def access(row: dict) -> str:
@@ -19,8 +15,8 @@ tab_add, tab_remove, tab_done = st.tabs(["To add", "To remove", "Done (30 days)"
 
 with tab_add:
     rows = queries.to_grant()
-    ui.table(rows, ["request_ref", "user_email", "group_name", "data_product_name", "classification_code",
-                    "is_break_glass", "incident_ref", "decided_at"])
+    ui.table(rows, ["request_ref", "user_email", "group_name", "data_product_name",
+                    "decided_at"])
     if rows:
         with st.form("grant"):
             g = st.selectbox("Member added to the group", rows, format_func=access)
@@ -32,7 +28,7 @@ with tab_add:
 with tab_remove:
     rows = queries.to_remove()
     ui.table(rows, ["request_ref", "user_email", "group_name", "data_product_name", "why", "revoke_requested_at",
-                    "valid_to", "is_break_glass"])
+                    "valid_to"])
     if rows:
         with st.form("remove"):
             g = st.selectbox("Member removed from the group", rows, format_func=access)

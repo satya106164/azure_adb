@@ -1,6 +1,6 @@
 import pytest
 
-from cdp_security import naming, notify, service
+from cdp_security import naming, notify, service, unity
 
 
 # ---- group names -------------------------------------------------------------------
@@ -23,8 +23,8 @@ def test_suggested_group_name_follows_the_convention():
 
 # ---- data products -------------------------------------------------------------------
 def _dp(**kw):
-    values = dict(name="Sales", description=None, data_product_type="POWER_BI", project=None, catalog=None,
-                  schema=None, classification_code="GENERAL", owner_email="o@x.com", steward_email="s@x.com",
+    values = dict(name="Sales", description=None, data_product_type="POWER_BI", environment="dev", project=None,
+                  catalog=None, schema=None, owner_email="o@x.com", approver2_email="a2@x.com",
                   home_workspace_code=None)
     values.update(kw)
     return service._data_product_values(**values)
@@ -47,6 +47,15 @@ def test_data_product_type_and_project():
         _dp(data_product_type="TABLE")
 
 
+def test_two_different_approvers_required():
+    v = _dp(owner_email=" Owner@X.com ", approver2_email="a2@x.com")
+    assert (v["owner"], v["approver2"]) == ("owner@x.com", "a2@x.com")
+    with pytest.raises(service.ServiceError, match="different people"):
+        _dp(owner_email="o@x.com", approver2_email="O@x.com")
+    with pytest.raises(service.ServiceError, match="Approver 2 email"):
+        _dp(approver2_email="")
+
+
 def test_odd_schema_names_refused():
     with pytest.raises(service.ServiceError, match="only letters"):
         _dp(data_product_type="SCHEMA", catalog="main", schema="a`; drop")
@@ -54,6 +63,25 @@ def test_odd_schema_names_refused():
 
 def test_workspace_types():
     assert list(service.WORKSPACE_TYPES) == ["INGESTION", "ANALYTICS_PBI", "MLOPS", "DATABRICKS_DASHBOARDS"]
+
+
+# ---- environments and catalogs ------------------------------------------------------------
+def test_four_environments():
+    assert service.ENVIRONMENTS == {"dev": "Dev", "tst": "Test", "pre": "Pre-prod", "prd": "Prod"}
+    assert _dp(environment="pre")["env"] == "pre"
+    with pytest.raises(service.ServiceError, match="Environment must be"):
+        _dp(environment="uat")
+    with pytest.raises(service.ServiceError, match="Environment must be"):
+        service._workspace_values("ws", "MLOPS", "https://adb-1.2.azuredatabricks.net", "prod")
+
+
+def test_catalogs_filtered_by_environment():
+    names = ["dev_gold", "dev-silver", "devops", "test_gold", "tst_gold", "pre_gold", "preprod_gold", "prd_gold",
+             "prod_gold", "main", "system"]
+    assert unity.for_environment(names, "dev") == ["dev_gold", "dev-silver"]
+    assert unity.for_environment(names, "tst") == ["test_gold", "tst_gold"]
+    assert unity.for_environment(names, "pre") == ["pre_gold", "preprod_gold"]
+    assert unity.for_environment(names, "prd") == ["prd_gold", "prod_gold"]
 
 
 def test_access_label_names_the_type():
@@ -71,3 +99,18 @@ def test_admin_alerts_link_to_the_admin_app(monkeypatch):
         assert notify._footer().endswith("https://req")
     finally:
         get_settings.cache_clear()
+
+
+# ---- page instructions ------------------------------------------------------------------
+def test_every_page_has_instructions():
+    import pathlib
+    import re
+
+    from cdp_security.help_text import PAGES
+
+    views = pathlib.Path(__file__).resolve().parent.parent / "app" / "views"
+    used = {k for f in views.glob("*.py")
+            for k in re.findall(r'(?:page_header\("[^"]+", |instructions\()"(\w+)"', f.read_text())}
+    assert used and used <= set(PAGES), used - set(PAGES)
+    for key, page in PAGES.items():
+        assert page["summary"] and page["steps"], key

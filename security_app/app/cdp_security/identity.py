@@ -42,9 +42,6 @@ def resolve_app_roles(email: str, token: str | None) -> frozenset[AppRole]:
     settings = get_settings()
     group_map = {
         settings.admin_group.lower(): AppRole.ADMIN,
-        settings.security_group.lower(): AppRole.SECURITY,
-        settings.auditor_group.lower(): AppRole.AUDITOR,
-        settings.break_glass_group.lower(): AppRole.BREAK_GLASS,
     }
     roles = {group_map[g.lower()] for g in groups_from_token(token) if g.lower() in group_map}
     roles |= {AppRole(r) for r in settings.local_dev_roles if r in AppRole.__members__}

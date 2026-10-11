@@ -3,8 +3,7 @@ import streamlit as st
 from cdp_security import queries, service, ui
 
 user = ui.user()
-st.title("My access")
-ui.show_flash()
+ui.page_header("My access", "my_access")
 
 grants = queries.my_grants(user.email)
 st.subheader("What you can access")
@@ -13,8 +12,7 @@ if not grants:
 for g in grants:
     ends = f"until {g['valid_to']:%d %b %Y}" if g["status"] == "ACTIVE" else ui.STATUS_LABELS.get(g["status"], "")
     with st.expander(f"{service.access_label(g)} - {ends}"):
-        st.markdown(f"{ui.classification(g['classification_code'])} {ui.status(g['status'])}"
-                    + ("  :red[break-glass]" if g["is_break_glass"] else ""))
+        st.markdown(ui.status(g["status"]))
         st.caption(f"Group {g['group_name']} - request {g['request_ref']}")
         if g["status"] != "ACTIVE":
             continue
@@ -22,7 +20,7 @@ for g in grants:
         with left.form(f"extend-{g['grant_id']}"):
             days = st.number_input("Extend by (days)", 1, 3650, 90)
             why = st.text_area("Why do you still need it?", key=f"why-{g['grant_id']}")
-            if st.form_submit_button("Request extension", disabled=g["is_break_glass"]):
+            if st.form_submit_button("Request extension"):
                 ui.act(lambda: service.request_extension(user, g["grant_id"], int(days), why),
                        "Extension requested. Your approvers have been notified.")
         with right:
@@ -34,7 +32,7 @@ for g in grants:
 st.subheader("My requests")
 requests_ = queries.my_requests(user.email)
 ui.table(requests_, ["request_ref", "request_type", "status", "data_product_name", "group_name",
-                     "classification_code", "beneficiary_email", "current_stage_no", "total_stages", "submitted_at"])
+                     "beneficiary_email", "submitted_at", "decided_at"])
 cancellable = [r for r in requests_ if r["status"] == "PENDING_APPROVAL"]
 if cancellable:
     pick = st.selectbox("Cancel a request", [None] + cancellable,

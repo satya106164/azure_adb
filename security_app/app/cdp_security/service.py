@@ -34,7 +34,6 @@ log = logging.getLogger(__name__)
 
 LIVE_GRANT_STATES = ("PENDING_PROVISION", "ACTIVE", "PENDING_REVOKE")
 OPEN_GRANT_REQUEST_STATES = ("DRAFT", "PENDING_APPROVAL", "APPROVED")
-CLASSIFICATIONS = ("GENERAL", "CONFIDENTIAL", "RESTRICTED")
 WORKSPACE_TYPES = {
     "INGESTION": "Ingestion",
     "ANALYTICS_PBI": "Analytics (Power BI)",
@@ -49,8 +48,9 @@ DATA_PRODUCT_TYPES = {
     "DATABRICKS_APP": "Databricks app",
     "SCHEMA": "Schema",
 }
-ENVIRONMENTS = ("dev", "tst", "prd")
+ENVIRONMENTS = {"dev": "Dev", "tst": "Test", "pre": "Pre-prod", "prd": "Prod"}
 STALE = "This changed while you were working on it. Refresh the page and try again."
+DEFAULT_GRANT_DAYS = 365  # only if a request carries no end date
 
 
 class ServiceError(Exception):
@@ -123,14 +123,8 @@ def ensure_user(email: str, display_name: str | None = None) -> dict:
     return fetch_one("SELECT * FROM app_user WHERE email = :email", {"email": email})
 
 
-def load_rules() -> list[ApprovalRule]:
-    return [ApprovalRule(r["stage_no"], r["classification_code"], ApproverRole(r["approver_role"]), r["sla_hours"])
-            for r in fetch_all("SELECT * FROM approval_rule ORDER BY classification_code, stage_no")]
-
-
-def classification(code: str) -> dict:
-    return _must(fetch_one("SELECT * FROM classification WHERE classification_code = :c", {"c": code}),
-                 "Classification")
+def plan_stages() -> list[ApprovalRule]:
+    return workflow.plan_stages(get_settings().approval_sla_hours)
 
 
 def get_group(group_code: str) -> dict:
@@ -141,13 +135,19 @@ def _grant(grant_id: str) -> dict:
     return _must(fetch_one("SELECT * FROM access_grant WHERE grant_id = :id", {"id": grant_id}), "Grant")
 
 
-def owners_for_group(group: dict) -> dict[ApproverRole, set[str]]:
-    """Data owner and steward of the group's data product (FR-29), if still active people."""
-    named = {ApproverRole.DATA_OWNER: group.get("owner_email"), ApproverRole.STEWARD: group.get("steward_email")}
-    emails = [e for e in named.values() if e]
+def active_approvers(row: dict) -> list[str]:
+    """The data product's owner / approver and approver 2, in that order, if still active people.
+    row is a v_group / v_grant / v_request row (or a data_product row)."""
+    named = [e for e in (row.get("owner_email"), row.get("approver2_email")) if e]
     inactive = {r["email"] for r in fetch_all("SELECT email FROM app_user WHERE email IN (:e) AND NOT is_active",
-                                              {"e": emails})}
-    return {role: {email} for role, email in named.items() if email and email not in inactive}
+                                              {"e": named})}
+    return [e for e in dict.fromkeys(named) if e not in inactive]
+
+
+def owners_for_group(group: dict) -> dict[ApproverRole, set[str]]:
+    """Who may approve requests for the group: either approver of its data product."""
+    approvers = active_approvers(group)
+    return {ApproverRole.APPROVER: set(approvers)} if approvers else {}
 
 
 def active_delegations() -> dict[str, set[str]]:
@@ -163,7 +163,7 @@ def active_delegations() -> dict[str, set[str]]:
 def _prior_approvers(request_ids: list) -> dict[str, set[str]]:
     out: dict[str, set[str]] = {}
     for r in fetch_all("SELECT request_id, decided_by_email FROM approval_task WHERE request_id IN (:ids) "
-                       "AND status = 'APPROVED' AND NOT is_post_hoc", {"ids": list(request_ids)}):
+                       "AND status = 'APPROVED'", {"ids": list(request_ids)}):
         out.setdefault(r["request_id"], set()).add(r["decided_by_email"])
     return out
 
@@ -181,16 +181,15 @@ def approval_context(request: dict, group: dict, delegations: dict[str, set[str]
     )
 
 
-def _create_task(request_id: str, rule: ApprovalRule, now: datetime, *, is_post_hoc: bool = False,
-                 due_at: datetime | None = None) -> dict:
+def _create_task(request_id: str, rule: ApprovalRule, now: datetime) -> dict:
     settings = get_settings()
     task = {"task_id": str(uuid.uuid4()), "request_id": request_id, "stage_no": rule.stage_no,
-            "approver_role": rule.approver_role.value, "is_post_hoc": is_post_hoc, "now": now,
-            "due_at": due_at or workflow.add_business_hours(now, rule.sla_hours, settings.holidays, settings.timezone)}
+            "approver_role": rule.approver_role.value, "now": now,
+            "due_at": workflow.add_business_hours(now, rule.sla_hours, settings.holidays, settings.timezone)}
     n = db.execute(
         """
-        INSERT INTO approval_task (task_id, request_id, stage_no, approver_role, status, is_post_hoc, due_at, created_at)
-        SELECT :task_id, :request_id, :stage_no, :approver_role, 'PENDING', :is_post_hoc, :due_at, :now
+        INSERT INTO approval_task (task_id, request_id, stage_no, approver_role, status, due_at, created_at)
+        SELECT :task_id, :request_id, :stage_no, :approver_role, 'PENDING', :due_at, :now
         FROM (SELECT 1) one
         WHERE NOT EXISTS (SELECT 1 FROM approval_task WHERE request_id = :request_id AND stage_no = :stage_no)
         """, task)
@@ -209,7 +208,6 @@ def _describe(req: dict) -> str:
     return "\n".join([
         f"Reference: {req['request_ref']}",
         f"Access: {access_label(req)} - group {req['group_name']}",
-        f"Classification: {req['classification_code']}",
         f"Requested by: {req['requester_email']}",
         f"For: {req['beneficiary_email']}",
         f"Justification: {req['justification']}",
@@ -217,17 +215,13 @@ def _describe(req: dict) -> str:
 
 
 def _notify_stage(req: dict, rule: ApprovalRule, ctx: ApprovalContext, due: datetime) -> None:
-    subject = f"Approval needed: {req['request_ref']} ({req['classification_code']})"
-    body = _describe(req) + f"\n\nStage {rule.stage_no}: {rule.approver_role.value}. Due {due:%d %b %Y %H:%M} UTC."
-    if rule.approver_role == ApproverRole.SECURITY:
-        notify.security_alert(subject, body, "APPROVAL_NEEDED", request_id=req["request_id"],
-                              dedupe_key=f"approval:{req['request_id']}:{rule.stage_no}")
-        return
+    subject = f"Approval needed: {req['request_ref']}"
+    body = _describe(req) + f"\n\nDue {due:%d %b %Y %H:%M} UTC."
     recipients = workflow.eligible_approvers(rule.approver_role, ctx)
     if not recipients:
         notify.admin_alert(f"No eligible approver for {req['request_ref']}",
-                           body + "\n\nSet the data product's owner / steward, or a delegate, so the request "
-                                  "can proceed.", "NO_APPROVER",
+                           body + "\n\nSet the data product's owner / approver or approver 2, or decide it "
+                                  "yourself on the Approvals page of Catalog admin.", "NO_APPROVER",
                            dedupe_key=f"noapprover:{req['request_id']}:{rule.stage_no}")
         return
     notify.enqueue(recipients.keys(), subject, body, "APPROVAL_NEEDED", request_id=req["request_id"],
@@ -304,12 +298,12 @@ def _insert_request(request_id: str, values: dict, duplicate_condition: str, dup
     n = db.execute(
         f"""
         INSERT INTO access_request (request_id, request_seq, request_ref, request_type, requester_email,
-            beneficiary_email, group_code, extends_grant_id, classification_code, justification, incident_ref,
+            beneficiary_email, group_code, extends_grant_id, classification_code, justification,
             requested_duration_days, status, current_stage_no, submitted_at, decided_at, version, created_at,
             updated_at)
         SELECT :id, s.seq, {_next_code('SAR', 7)}, :type, :requester, :beneficiary, :group_code,
-               CAST(:extends AS STRING), :cls, :why, CAST(:incident AS STRING), CAST(:days AS INT), :status,
-               CAST(:stage AS INT), :now, CAST(:decided AS TIMESTAMP), 1, :now, :now
+               CAST(:extends AS STRING), CAST(:cls AS STRING), :why,
+               CAST(:days AS INT), :status, CAST(:stage AS INT), :now, CAST(:decided AS TIMESTAMP), 1, :now, :now
         FROM (SELECT coalesce(max(request_seq), 0) + 1 AS seq FROM access_request) s
         WHERE NOT EXISTS ({duplicate_condition})
         """, {"id": request_id, **values, **duplicate_params})
@@ -324,8 +318,6 @@ def submit_request(user: CurrentUser, *, group_code: str, justification: str, du
     if len(justification) < 20:
         raise ServiceError("Give a business justification of at least 20 characters.")
     rtype = RequestType(request_type)
-    if rtype == RequestType.BREAK_GLASS:
-        raise ServiceError("Use the break-glass page for emergency access.")
     requester = ensure_user(user.email, user.display_name)
     beneficiary = ensure_user(beneficiary_email or user.email)
     if not beneficiary["is_active"]:
@@ -339,8 +331,6 @@ def submit_request(user: CurrentUser, *, group_code: str, justification: str, du
         if (grant["status"] != GrantStatus.ACTIVE.value or grant["user_email"] != beneficiary["email"]
                 or grant["group_code"] != group_code):
             raise ServiceError("Only your own active access can be extended.")
-        if grant["is_break_glass"]:
-            raise ServiceError("Break-glass access cannot be extended; raise a normal request.")
         duplicate = ("SELECT 1 FROM access_request r WHERE r.request_type = 'EXTEND' "
                      "AND r.extends_grant_id = :dup_grant AND r.status IN ('DRAFT', 'PENDING_APPROVAL')")
         dup_params: dict[str, Any] = {"dup_grant": extends_grant_id}
@@ -356,7 +346,7 @@ def submit_request(user: CurrentUser, *, group_code: str, justification: str, du
         dup_params = {"dup_email": beneficiary["email"], "dup_group": group_code,
                       "dup_open": list(OPEN_GRANT_REQUEST_STATES)}
 
-    stages = workflow.plan_stages(load_rules(), group["classification_code"], rtype)
+    stages = plan_stages()
     if not duration_days or int(duration_days) < 1:
         raise ServiceError("Choose an end date after today.")
     duration = int(duration_days)
@@ -364,7 +354,7 @@ def submit_request(user: CurrentUser, *, group_code: str, justification: str, du
     status = workflow.next_request_status(RequestStatus.DRAFT, "submit", "requester")
     inserted = _insert_request(request_id, {
         "type": rtype, "requester": requester["email"], "beneficiary": beneficiary["email"], "group_code": group_code,
-        "extends": extends_grant_id, "cls": group["classification_code"], "why": justification, "incident": None,
+        "extends": extends_grant_id, "cls": None, "why": justification,
         "days": duration, "status": status, "stage": 1, "now": now, "decided": None}, duplicate, dup_params)
     if not inserted:
         raise ServiceError("There is already an open request for this access. Follow it on My access.")
@@ -385,8 +375,13 @@ def request_extension(user: CurrentUser, grant_id: str, duration_days: int, just
 
 
 @_service
-def decide_task(user: CurrentUser, task_id: str, approve: bool, comment: str | None = None) -> dict:
+def decide_task(user: CurrentUser, task_id: str, approve: bool, comment: str | None = None,
+                as_admin: bool = False) -> dict:
+    """Decide an approval task as an approver (or delegate), or with as_admin=True as an admin in place of the
+    approvers: the reason is then required and the data product's owner / approver is recorded as on-behalf-of."""
     comment = (comment or "").strip()
+    if as_admin and len(comment) < 5:
+        raise ServiceError("Give the reason you are deciding for the approvers (at least 5 characters).")
     if not approve and len(comment) < 5:
         raise ServiceError("Say why you are rejecting (at least 5 characters).")
     task = _must(fetch_one("SELECT * FROM approval_task WHERE task_id = :id", {"id": task_id}), "Task")
@@ -397,7 +392,11 @@ def decide_task(user: CurrentUser, task_id: str, approve: bool, comment: str | N
     req = _v_request(raw["request_id"])
     group = get_group(raw["group_code"])
     ctx = approval_context(req, group)
-    ok, reason, on_behalf = workflow.can_decide(user.email, user.app_roles, task["approver_role"], ctx)
+    if as_admin:
+        ok, reason = workflow.can_override(user.email, user.app_roles, ctx)
+        on_behalf = group["owner_email"]
+    else:
+        ok, reason, on_behalf = workflow.can_decide(user.email, user.app_roles, task["approver_role"], ctx)
     if not ok:
         raise ServiceError(reason)
     ensure_user(user.email, user.display_name)
@@ -412,18 +411,12 @@ def decide_task(user: CurrentUser, task_id: str, approve: bool, comment: str | N
         raise ServiceError("This approval has already been decided.")
     decided = {**task, "status": decision, "decided_by_email": user.email, "on_behalf_of_email": on_behalf,
                "decided_at": now, "decision_comment": comment or None}
-    audit.record(user, f"TASK_{decision}", "APPROVAL_TASK", task_id, before=task, after=decided,
-                 reason=comment or None, correlation_id=req["request_ref"])
-
-    if task["is_post_hoc"]:  # break-glass review
-        if not approve:
-            grant = fetch_one("SELECT * FROM access_grant WHERE request_id = :id", {"id": raw["request_id"]})
-            if grant and grant["status"] == GrantStatus.ACTIVE.value:
-                mark_for_revoke(grant, RevokeReason.POST_HOC_REJECTED, user, comment)
-            notify.security_alert(f"Break-glass use rejected on review: {req['request_ref']}",
-                                  _describe(req) + f"\n\nReviewer: {user.email}\nComment: {comment}",
-                                  "BREAK_GLASS_REJECTED", request_id=raw["request_id"])
-        return decided
+    audit.record(user, f"TASK_{decision}" + ("_BY_ADMIN" if as_admin else ""), "APPROVAL_TASK", task_id,
+                 before=task, after=decided, reason=comment or None, correlation_id=req["request_ref"])
+    if as_admin:
+        notify.enqueue(active_approvers(group), f"Decided for you by an admin: {req['request_ref']}",
+                       _describe(req) + f"\n\n{decision.title()} by admin {user.email}, as you were not able to. "
+                       f"Reason: {comment}", "TASK_DECIDED_BY_ADMIN", request_id=raw["request_id"])
 
     if not approve:
         status = workflow.next_request_status(raw["status"], "reject", "approver")
@@ -435,7 +428,7 @@ def decide_task(user: CurrentUser, task_id: str, approve: bool, comment: str | N
                        request_id=raw["request_id"])
         return decided
 
-    stages = workflow.plan_stages(load_rules(), raw["classification_code"], raw["request_type"])
+    stages = plan_stages()
     remaining = [s for s in stages if s.stage_no > task["stage_no"]]
     if remaining:
         status = workflow.next_request_status(raw["status"], "approve_stage", "approver")
@@ -458,10 +451,9 @@ def _cancel_by_system(user: CurrentUser, raw: dict, req: dict, now: datetime, wh
 
 
 def _finalise_approval(user: CurrentUser, raw: dict, req: dict, now: datetime) -> None:
-    cls = classification(raw["classification_code"])
     # A new grant ends on the date the requester chose (counted from submission); an extension from now
     start = now if raw["request_type"] == RequestType.EXTEND.value else raw["submitted_at"]
-    valid_to = max(workflow.effective_valid_to(start, raw["requested_duration_days"], cls["max_grant_days"]),
+    valid_to = max(workflow.effective_valid_to(start, raw["requested_duration_days"], DEFAULT_GRANT_DAYS),
                    now + timedelta(days=1))
 
     if raw["request_type"] == RequestType.EXTEND.value:
@@ -493,9 +485,9 @@ def _finalise_approval(user: CurrentUser, raw: dict, req: dict, now: datetime) -
     grant_id = str(uuid.uuid4())
     n = db.execute(
         """
-        INSERT INTO access_grant (grant_id, request_id, user_email, group_code, status, is_break_glass, valid_from,
-                                  valid_to, last_recertified_at, expiry_notice_level, created_at, updated_at)
-        SELECT :id, :request_id, :e, :g, 'PENDING_PROVISION', false, :now, :to, :now, 0, :now, :now
+        INSERT INTO access_grant (grant_id, request_id, user_email, group_code, status, valid_from, valid_to,
+                                  last_recertified_at, expiry_notice_level, created_at, updated_at)
+        SELECT :id, :request_id, :e, :g, 'PENDING_PROVISION', :now, :to, :now, 0, :now, :now
         FROM (SELECT 1) one
         WHERE NOT EXISTS (SELECT 1 FROM access_grant WHERE user_email = :e AND group_code = :g AND status IN (:live))
         """, {"id": grant_id, "request_id": raw["request_id"], "now": now, "to": valid_to, **live})
@@ -532,54 +524,6 @@ def cancel_request(user: CurrentUser, request_id: str) -> None:
 
 
 @_service
-def break_glass(user: CurrentUser, group_code: str, incident_ref: str, justification: str) -> dict:
-    _require(user, AppRole.BREAK_GLASS)
-    incident_ref = (incident_ref or "").strip()
-    justification = (justification or "").strip()
-    if not incident_ref or len(justification) < 20:
-        raise ServiceError("An incident reference and a justification (20+ characters) are required.")
-    settings = get_settings()
-    me = ensure_user(user.email, user.display_name)
-    group = get_group(group_code)
-    if group["status"] != "ACTIVE":
-        raise ServiceError("Break-glass needs an active group.")
-    request_id, now = str(uuid.uuid4()), db.now()
-    status = workflow.next_request_status(RequestStatus.DRAFT, "break_glass", "break_glass")
-    live = {"dup_e": me["email"], "dup_g": group_code, "dup_live": list(LIVE_GRANT_STATES)}
-    inserted = _insert_request(request_id, {
-        "type": RequestType.BREAK_GLASS, "requester": me["email"], "beneficiary": me["email"],
-        "group_code": group_code, "extends": None, "cls": group["classification_code"], "why": justification,
-        "incident": incident_ref, "days": None, "status": status, "stage": None, "now": now, "decided": now},
-        "SELECT 1 FROM access_grant WHERE user_email = :dup_e AND group_code = :dup_g AND status IN (:dup_live)",
-        live)
-    if not inserted:
-        raise ServiceError("You already have this access.")
-    valid_to = workflow.effective_valid_to(now, None, 1, request_type=RequestType.BREAK_GLASS,
-                                           break_glass_hours=settings.break_glass_hours)
-    grant_id = str(uuid.uuid4())
-    db.execute(
-        "INSERT INTO access_grant (grant_id, request_id, user_email, group_code, status, is_break_glass, valid_from, "
-        "valid_to, expiry_notice_level, created_at, updated_at) "
-        "VALUES (:id, :request_id, :e, :g, 'PENDING_PROVISION', true, :now, :to, 0, :now, :now)",
-        {"id": grant_id, "request_id": request_id, "e": me["email"], "g": group_code, "now": now, "to": valid_to})
-    review = ApprovalRule(1, group["classification_code"], ApproverRole.SECURITY, 1)
-    _create_task(request_id, review, now, is_post_hoc=True,
-                 due_at=now + timedelta(hours=settings.break_glass_review_hours))
-    req = _v_request(request_id)
-    audit.record(user, "BREAK_GLASS_INVOKED", "ACCESS_GRANT", grant_id, after=_grant(grant_id),
-                 reason=f"{incident_ref}: {justification}", correlation_id=req["request_ref"])
-    notify.security_alert(f"Break-glass access used: {group['group_name']}",
-                          _describe(req) + f"\nIncident: {incident_ref}\nLasts {settings.break_glass_hours} hours "
-                          f"once an admin adds the member.\nA security reviewer must review this within "
-                          f"{settings.break_glass_review_hours} hours.", "BREAK_GLASS_INVOKED", request_id=request_id)
-    notify.admin_alert(f"URGENT - add member: {me['email']} to {group['group_name']}",
-                       _describe(req) + f"\nIncident: {incident_ref}\n\nEmergency access: add the person to the "
-                       "group now, then mark it granted on the Fulfilment page.", "ADD_MEMBER",
-                       dedupe_key=f"add:{grant_id}")
-    return req
-
-
-@_service
 def revoke_grant(user: CurrentUser, grant_id: str, note: str | None = None) -> dict:
     grant = _grant(grant_id)
     if grant["status"] != GrantStatus.ACTIVE.value:
@@ -589,10 +533,10 @@ def revoke_grant(user: CurrentUser, grant_id: str, note: str | None = None) -> d
         reason = RevokeReason.SELF
     elif user.has(AppRole.ADMIN):
         reason = RevokeReason.ADMIN
-    elif user.email in owners_for_group(group).get(ApproverRole.DATA_OWNER, set()):
+    elif user.email in active_approvers(group):
         reason = RevokeReason.OWNER
     else:
-        raise ServiceError("Only the person, the data owner or an admin can remove this access.")
+        raise ServiceError("Only the person, an approver of the data product or an admin can remove this access.")
     after = mark_for_revoke(grant, reason, user, note)
     if after is None:
         raise ServiceError("This access is already being removed.")
@@ -658,8 +602,7 @@ def recert_decide(user: CurrentUser, item_id: str, keep: bool, comment: str | No
 # ---------------------------------------------------------------------------
 @_service
 def mark_granted(user: CurrentUser, grant_id: str, note: str | None = None) -> dict:
-    """The admin has added the person to the group. Access ends on the date approved; emergency access
-    gets its full hours from now."""
+    """The admin has added the person to the group. Access ends on the date approved."""
     _require(user, AppRole.ADMIN)
     grant = _must(fetch_one("SELECT * FROM v_grant WHERE grant_id = :id", {"id": grant_id}), "Grant")
     if grant["status"] != GrantStatus.PENDING_PROVISION.value:
@@ -669,14 +612,11 @@ def mark_granted(user: CurrentUser, grant_id: str, note: str | None = None) -> d
     if get_group(grant["group_code"])["status"] != "ACTIVE":
         raise ServiceError(f"{grant['group_name']} is being retired; this access has been withdrawn.")
     now = db.now()
-    if grant["is_break_glass"]:
-        valid_from, valid_to = now, now + (grant["valid_to"] - grant["valid_from"])
-    else:
-        valid_from, valid_to = grant["valid_from"], grant["valid_to"]
-        if valid_to <= now:
-            withdraw_pending_grant(grant, RevokeReason.EXPIRED, user, "End date passed before the member was added")
-            raise ServiceError(f"This access was approved until {valid_to:%d-%m-%Y}, which has passed, so it has "
-                               "been closed. Do not add the person; they can raise a new request.")
+    valid_from, valid_to = grant["valid_from"], grant["valid_to"]
+    if valid_to <= now:
+        withdraw_pending_grant(grant, RevokeReason.EXPIRED, user, "End date passed before the member was added")
+        raise ServiceError(f"This access was approved until {valid_to:%d-%m-%Y}, which has passed, so it has "
+                           "been closed. Do not add the person; they can raise a new request.")
     n = db.execute(
         "UPDATE access_grant SET status = :new, valid_from = :from, valid_to = :to, provisioned_at = :now, "
         "provisioned_by = :by, fulfilment_note = :note, updated_at = current_timestamp() "
@@ -755,6 +695,11 @@ def databricks_workspace_id(host_url: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
+def _check_environment(environment: str) -> None:
+    if environment not in ENVIRONMENTS:
+        raise ServiceError(f"Environment must be one of {', '.join(ENVIRONMENTS.values())}.")
+
+
 def _workspace_values(name: str, workspace_type: str, host_url: str, environment: str) -> dict:
     name = (name or "").strip()
     host = (host_url or "").strip().rstrip("/").lower()
@@ -764,8 +709,7 @@ def _workspace_values(name: str, workspace_type: str, host_url: str, environment
         raise ServiceError(f"Workspace type must be one of {', '.join(WORKSPACE_TYPES)}.")
     if not re.match(r"^https://[a-z0-9.-]+$", host):
         raise ServiceError("The workspace URL must look like https://adb-1234567890123456.7.azuredatabricks.net")
-    if environment not in ENVIRONMENTS:
-        raise ServiceError("Environment must be dev, tst or prd.")
+    _check_environment(environment)
     return {"name": name, "type": workspace_type, "host": host, "env": environment,
             "wsid": databricks_workspace_id(host)}
 
@@ -809,14 +753,15 @@ def update_workspace(user: CurrentUser, workspace_code: str, *, name: str, works
     return after
 
 
-def _data_product_values(name: str, description: str | None, data_product_type: str, project: str | None,
-                         catalog: str | None, schema: str | None, classification_code: str, owner_email: str,
-                         steward_email: str, home_workspace_code: str | None) -> dict:
+def _data_product_values(name: str, description: str | None, data_product_type: str, environment: str,
+                         project: str | None, catalog: str | None, schema: str | None, owner_email: str,
+                         approver2_email: str, home_workspace_code: str | None) -> dict:
     name = (name or "").strip()
     if not name:
         raise ServiceError("Give the data product a name.")
     if data_product_type not in DATA_PRODUCT_TYPES:
         raise ServiceError(f"Type must be one of {', '.join(DATA_PRODUCT_TYPES.values())}.")
+    _check_environment(environment)
     catalog = (catalog or "").strip().lower() or None
     schema = (schema or "").strip().lower() or None
     if data_product_type == "SCHEMA" and not (catalog and schema):
@@ -826,28 +771,30 @@ def _data_product_values(name: str, description: str | None, data_product_type: 
     for what, value in (("Catalog", catalog), ("Schema", schema)):
         if value and not _UC_NAME_RE.match(value):
             raise ServiceError(f"{what} name {value!r} may use only letters, digits, _ and -.")
-    if classification_code not in CLASSIFICATIONS:
-        raise ServiceError(f"Classification must be one of {', '.join(CLASSIFICATIONS)}.")
-    owner, steward = _email(owner_email, "Data owner email"), _email(steward_email, "Steward email")
-    if classification_code != "GENERAL" and owner == steward:
-        raise ServiceError("Data owner and steward must be different people for confidential or restricted data.")
+    owner = _email(owner_email, "Owner / approver email")
+    approver2 = _email(approver2_email, "Approver 2 email")
+    if owner == approver2:
+        raise ServiceError("Owner / approver and approver 2 must be different people.")
     if home_workspace_code and not fetch_one("SELECT 1 AS x FROM workspace WHERE workspace_code = :c",
                                              {"c": home_workspace_code}):
         raise ServiceError(f"Workspace {home_workspace_code} is not registered.")
     return {"name": name, "description": (description or "").strip() or None, "type": data_product_type,
-            "project": (project or "").strip() or None, "catalog": catalog, "schema": schema,
-            "cls": classification_code, "owner": owner, "steward": steward, "home": home_workspace_code or None}
+            "env": environment, "project": (project or "").strip() or None, "catalog": catalog, "schema": schema,
+            "owner": owner, "approver2": approver2, "home": home_workspace_code or None}
 
 
-# Another data product with the same name, or (schema type) the same schema
-_DP_CLASH = ("data_product_code <> :c AND (lower(name) = lower(:name) OR (:type = 'SCHEMA' "
-             "AND data_product_type = 'SCHEMA' AND catalog_name = :catalog AND schema_name = :schema))")
+# Another data product with the same name in the same environment, or (schema type) the same schema
+_DP_CLASH = ("data_product_code <> :c AND ((environment = :env AND lower(name) = lower(:name)) "
+             "OR (:type = 'SCHEMA' AND data_product_type = 'SCHEMA' AND catalog_name = :catalog "
+             "AND schema_name = :schema))")
 
 
 def _check_data_product_clash(v: dict, code: str) -> None:
-    clash = fetch_one(f"SELECT name, data_product_code FROM data_product WHERE {_DP_CLASH} LIMIT 1", {**v, "c": code})
-    if clash and clash["name"].lower() == v["name"].lower():
-        raise ServiceError(f"A data product named {clash['name']} is already registered ({clash['data_product_code']}).")
+    clash = fetch_one(f"SELECT name, data_product_code, environment FROM data_product WHERE {_DP_CLASH} LIMIT 1",
+                      {**v, "c": code})
+    if clash and clash["name"].lower() == v["name"].lower() and clash["environment"] == v["env"]:
+        raise ServiceError(f"A data product named {clash['name']} is already registered in "
+                           f"{ENVIRONMENTS[v['env']]} ({clash['data_product_code']}).")
     if clash:
         raise ServiceError(f"{v['catalog']}.{v['schema']} is already registered as data product "
                            f"{clash['data_product_code']} {clash['name']}.")
@@ -855,54 +802,56 @@ def _check_data_product_clash(v: dict, code: str) -> None:
 
 @_service
 def register_data_product(user: CurrentUser, *, name: str, description: str | None, data_product_type: str,
-                          project: str | None = None, catalog: str | None = None, schema: str | None = None,
-                          classification_code: str, owner_email: str, steward_email: str,
+                          environment: str, project: str | None = None, catalog: str | None = None,
+                          schema: str | None = None, owner_email: str, approver2_email: str,
                           home_workspace_code: str | None = None) -> dict:
     """Registers the data product only; groups are registered separately (FR-3, FR-9)."""
     _require(user, AppRole.ADMIN)
-    v = _data_product_values(name, description, data_product_type, project, catalog, schema, classification_code,
-                             owner_email, steward_email, home_workspace_code)
+    v = _data_product_values(name, description, data_product_type, environment, project, catalog, schema,
+                             owner_email, approver2_email, home_workspace_code)
     _check_data_product_clash(v, "")
     ensure_user(v["owner"])
-    ensure_user(v["steward"])
+    ensure_user(v["approver2"])
     n = db.execute(
         f"""
         INSERT INTO data_product (data_product_code, data_product_seq, name, description, data_product_type,
-                                  project_name, catalog_name, schema_name, classification_code, home_workspace_code,
-                                  owner_email, steward_email, lifecycle_status, created_by, created_at, updated_at)
-        SELECT {_next_code('DP', 4)}, s.seq, :name, CAST(:description AS STRING), :type, CAST(:project AS STRING),
-               CAST(:catalog AS STRING), CAST(:schema AS STRING), :cls, CAST(:home AS STRING), :owner, :steward,
-               'ACTIVE', :by, current_timestamp(), current_timestamp()
+                                  environment, project_name, catalog_name, schema_name, home_workspace_code,
+                                  owner_email, approver2_email, lifecycle_status, created_by, created_at, updated_at)
+        SELECT {_next_code('DP', 4)}, s.seq, :name, CAST(:description AS STRING), :type, :env,
+               CAST(:project AS STRING), CAST(:catalog AS STRING), CAST(:schema AS STRING), CAST(:home AS STRING),
+               :owner, :approver2, 'ACTIVE', :by, current_timestamp(), current_timestamp()
         FROM (SELECT coalesce(max(data_product_seq), 0) + 1 AS seq FROM data_product) s
         WHERE NOT EXISTS (SELECT 1 FROM data_product WHERE {_DP_CLASH})
         """, {**v, "c": "", "by": user.email})
     if n != 1:
         raise ServiceError(STALE)
-    row = fetch_one("SELECT * FROM data_product WHERE lower(name) = lower(:name)", v)
+    row = fetch_one("SELECT * FROM data_product WHERE environment = :env AND lower(name) = lower(:name)", v)
     audit.record(user, "DATA_PRODUCT_REGISTERED", "DATA_PRODUCT", row["data_product_code"], after=row)
     return row
 
 
 @_service
 def update_data_product(user: CurrentUser, data_product_code: str, *, name: str, description: str | None,
-                        data_product_type: str, project: str | None = None, catalog: str | None = None,
-                        schema: str | None = None, classification_code: str, owner_email: str, steward_email: str,
-                        home_workspace_code: str | None, lifecycle_status: str = "ACTIVE") -> dict:
-    """Edit any field. A new owner / steward is audited with old and new values (FR-12)."""
+                        data_product_type: str, environment: str, project: str | None = None,
+                        catalog: str | None = None, schema: str | None = None, owner_email: str,
+                        approver2_email: str, home_workspace_code: str | None,
+                        lifecycle_status: str = "ACTIVE") -> dict:
+    """Edit any field. A new approver is audited with old and new values (FR-12); requests already waiting
+    go to the new approvers."""
     _require(user, AppRole.ADMIN)
     before = _must(fetch_one("SELECT * FROM data_product WHERE data_product_code = :c", {"c": data_product_code}),
                    "Data product")
     if lifecycle_status not in ("ACTIVE", "RETIRED"):
         raise ServiceError("Status must be ACTIVE or RETIRED.")
-    v = _data_product_values(name, description, data_product_type, project, catalog, schema, classification_code,
-                             owner_email, steward_email, home_workspace_code)
+    v = _data_product_values(name, description, data_product_type, environment, project, catalog, schema,
+                             owner_email, approver2_email, home_workspace_code)
     _check_data_product_clash(v, data_product_code)
     ensure_user(v["owner"])
-    ensure_user(v["steward"])
+    ensure_user(v["approver2"])
     db.execute(
         "UPDATE data_product SET name = :name, description = :description, data_product_type = :type, "
-        "project_name = :project, catalog_name = :catalog, schema_name = :schema, classification_code = :cls, "
-        "home_workspace_code = :home, owner_email = :owner, steward_email = :steward, lifecycle_status = :status, "
+        "environment = :env, project_name = :project, catalog_name = :catalog, schema_name = :schema, "
+        "home_workspace_code = :home, owner_email = :owner, approver2_email = :approver2, lifecycle_status = :status, "
         "updated_by = :by, updated_at = current_timestamp() WHERE data_product_code = :c",
         {**v, "status": lifecycle_status, "by": user.email, "c": data_product_code})
     after = fetch_one("SELECT * FROM data_product WHERE data_product_code = :c", {"c": data_product_code})

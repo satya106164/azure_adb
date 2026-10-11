@@ -1,6 +1,6 @@
 import streamlit as st
 
-from cdp_security import naming, queries, service, ui
+from cdp_security import naming, queries, service, ui, unity
 from cdp_security.config import get_settings
 from cdp_security.models import AppRole
 
@@ -8,11 +8,9 @@ user = ui.require(AppRole.ADMIN)
 settings = get_settings()
 st.title("Catalog admin")
 ui.show_flash()
-st.caption("Register workspaces, data products and their access groups. Identifiers (WS-, DP-, GRP-) are "
-           "generated for you. Approval routes and classification limits change only through a reviewed "
-           "database migration.")
+st.markdown("Register workspaces, data products and their access groups. Identifiers (WS-, DP-, GRP-) are "
+            "generated for you.")
 
-CLASSES = list(service.CLASSIFICATIONS)
 WS_TYPES = list(service.WORKSPACE_TYPES)
 DP_TYPES = list(service.DATA_PRODUCT_TYPES)
 ENVS = list(service.ENVIRONMENTS)
@@ -30,6 +28,28 @@ def dp_label(row: dict) -> str:
     return f"{row['data_product_code']} {row['name']} ({service.DATA_PRODUCT_TYPES[row['data_product_type']]})"
 
 
+NONE, TYPED = "(none)", "Type a name..."
+
+
+@st.cache_data(ttl=600, show_spinner="Loading catalogs...")
+def all_catalogs() -> list[str]:
+    return unity.catalogs()
+
+
+@st.cache_data(ttl=600, show_spinner="Loading schemas...")
+def schemas_in(catalog: str) -> list[str]:
+    return unity.schemas(catalog)
+
+
+def choose(col, label: str, names: list[str], current: str | None, key: str, help: str) -> str | None:
+    """Pick from names (the current value always offered), none, or type a name not in the list."""
+    options = [NONE] + sorted(set(names) | ({current} if current else set())) + [TYPED]
+    picked = col.selectbox(label, options, index=options.index(current) if current else 0, key=key, help=help)
+    if picked == TYPED:
+        return col.text_input(f"{label} name", key=f"{key}-typed").strip() or None
+    return None if picked == NONE else picked
+
+
 def pick(label: str, rows: list[dict], key: str, fmt):
     """Select an existing row to edit, or None for 'register new'."""
     return st.selectbox(label, [None] + rows, key=key,
@@ -40,6 +60,7 @@ tab_ws, tab_dp, tab_grp = st.tabs(["Workspaces", "Data products", "Groups"])
 
 # ---- Workspaces ----------------------------------------------------------------------
 with tab_ws:
+    ui.instructions("catalog_workspaces")
     ui.table([{**r, "workspace_type": service.WORKSPACE_TYPES.get(r["workspace_type"], r["workspace_type"])}
               for r in ws_rows],
              ["workspace_code", "name", "workspace_type", "environment", "host_url", "databricks_workspace_id",
@@ -55,7 +76,8 @@ with tab_ws:
         host = c1.text_input("Workspace URL", value=w["host_url"] if w else "",
                              placeholder="https://adb-1234567890123456.7.azuredatabricks.net",
                              help="The workspace id is read from the URL.")
-        env = c2.selectbox("Environment", ENVS, index=ENVS.index(w["environment"]) if w else 0)
+        env = c2.selectbox("Environment", ENVS, format_func=service.ENVIRONMENTS.get,
+                           index=ENVS.index(w["environment"]) if w and w["environment"] in ENVS else 0)
         active = c2.checkbox("Active", value=w["is_active"] if w else True, disabled=w is None)
         if st.form_submit_button("Save changes" if w else "Register workspace", type="primary"):
             if w:
@@ -69,25 +91,39 @@ with tab_ws:
 
 # ---- Data products -----------------------------------------------------------------
 with tab_dp:
+    ui.instructions("catalog_data_products")
     ui.table([{**r, "data_product_type": service.DATA_PRODUCT_TYPES[r["data_product_type"]]} for r in dp_rows],
-             ["data_product_code", "name", "data_product_type", "project_name", "catalog_name", "schema_name",
-              "classification_code", "owner_email", "steward_email", "workspace_name", "lifecycle_status"])
+             ["data_product_code", "name", "data_product_type", "environment", "project_name", "catalog_name",
+              "schema_name", "owner_email", "approver2_email", "workspace_name", "lifecycle_status"])
     d = pick("Edit or register", dp_rows, "dp-pick", dp_label)
-    with st.form(f"dp-{d['data_product_code'] if d else 'new'}"):
-        st.markdown(f"**{'Edit ' + d['data_product_code'] if d else 'Register a data product'}**")
+    dp_key = d["data_product_code"] if d else "new"
+    st.markdown(f"**{'Edit ' + d['data_product_code'] if d else 'Register a data product'}**")
+    # Outside the form, so the catalog and schema lists follow each choice straight away
+    c1, c2 = st.columns(2)
+    dp_env = c1.selectbox("Environment", ENVS, format_func=service.ENVIRONMENTS.get, key=f"dp-env-{dp_key}",
+                          index=ENVS.index(d["environment"]) if d and d.get("environment") in ENVS else 0)
+    show_all = c2.checkbox("Show all catalogs", key=f"dp-allcat-{dp_key}",
+                           help="Unticked, only catalogs named for the environment are listed (dev_..., prd_...).")
+    found = all_catalogs()
+    if not found:
+        st.caption("Catalogs could not be listed (the app needs BROWSE on them); type the name instead.")
+    catalog = choose(c1, "Catalog", found if show_all else unity.for_environment(found, dp_env),
+                     d["catalog_name"] if d else None, f"dp-cat-{dp_key}-{dp_env}-{show_all}",
+                     "Required for the Schema type; optional for the others.")
+    saved_schema = d["schema_name"] if d and d["catalog_name"] == catalog else None
+    schema = choose(c2, "Schema", schemas_in(catalog) if catalog else [], saved_schema,
+                    f"dp-sch-{dp_key}-{catalog}", "Required for the Schema type; optional for the others.")
+    with st.form(f"dp-{dp_key}"):
         c1, c2 = st.columns(2)
         name = c1.text_input("Name", value=d["name"] if d else "", placeholder="Member contributions")
         dtype = c2.selectbox("Type", DP_TYPES, format_func=service.DATA_PRODUCT_TYPES.get,
                              index=DP_TYPES.index(d["data_product_type"]) if d else 0)
         desc = st.text_area("Description", value=(d["description"] or "") if d else "")
-        project = c1.text_input("Project (optional)", value=(d["project_name"] or "") if d else "")
-        cls = c2.selectbox("Classification", CLASSES, index=CLASSES.index(d["classification_code"]) if d else 0)
-        catalog = c1.text_input("Catalog", value=(d["catalog_name"] or "") if d else "",
-                                help="Required for the Schema type; optional for the others.")
-        schema = c2.text_input("Schema", value=(d["schema_name"] or "") if d else "", placeholder="member_contributions",
-                               help="Required for the Schema type; optional for the others.")
-        owner = c1.text_input("Data owner email", value=d["owner_email"] if d else "")
-        steward = c2.text_input("Steward email", value=d["steward_email"] if d else "")
+        project = st.text_input("Project (optional)", value=(d["project_name"] or "") if d else "")
+        owner = c1.text_input("Owner / approver email", value=d["owner_email"] if d else "",
+                              help="Approves requests for every group of this data product.")
+        approver2 = c2.text_input("Approver 2 email", value=d["approver2_email"] if d else "",
+                                  help="Can also approve, e.g. when the owner is away. Must be someone else.")
         home = c1.selectbox("Home workspace", ws_codes, format_func=ws_label,
                             index=ws_codes.index(d["home_workspace_code"]) if d and d["home_workspace_code"]
                             in ws_codes else 0)
@@ -96,9 +132,9 @@ with tab_dp:
                               help="Retired data products take no new requests or groups. Retire their groups "
                                    "to remove existing access.")
         if st.form_submit_button("Save changes" if d else "Register data product", type="primary"):
-            values = dict(name=name, description=desc, data_product_type=dtype, project=project, catalog=catalog,
-                          schema=schema, classification_code=cls, owner_email=owner, steward_email=steward,
-                          home_workspace_code=home)
+            values = dict(name=name, description=desc, data_product_type=dtype, environment=dp_env,
+                          project=project, catalog=catalog, schema=schema, owner_email=owner,
+                          approver2_email=approver2, home_workspace_code=home)
             if d:
                 ui.act(lambda: service.update_data_product(user, d["data_product_code"], lifecycle_status=status,
                                                            **values), f"Data product {d['data_product_code']} saved.")
@@ -147,13 +183,11 @@ def group_form(g: dict | None, dps: list[dict]) -> None:
 
 
 with tab_grp:
+    ui.instructions("catalog_groups")
     groups = queries.groups()
     ui.table([{**r, "data_product_type": service.DATA_PRODUCT_TYPES[r["data_product_type"]]} for r in groups],
              ["group_code", "group_name", "data_product_code", "data_product_name", "data_product_type",
-              "classification_code", "status", "requestable"])
-    st.caption("Groups are created in Entra ID by the identity team. Register each one here and link it to its "
-               "data product; give the group its permissions on the dashboard, report, agent, app or schema "
-               "yourself. The app records who asked, who approved, and who added or removed each member.")
+              "environment", "status", "requestable"])
     g = pick("Edit or register", groups, "grp-pick", lambda r: f"{r['group_code']} {r['group_name']}")
     active_dps = [r for r in dp_rows if r["lifecycle_status"] == "ACTIVE"]
     if g is None:
@@ -170,7 +204,7 @@ with tab_grp:
         members = queries.group_members(g["group_code"])
         st.markdown(f"**Members ({len(members)})**")
         ui.table(members, ["user_email", "status", "valid_to", "provisioned_by", "last_recertified_at",
-                           "is_break_glass", "request_ref"])
+                           "request_ref"])
         active_members = [m for m in members if m["status"] == "ACTIVE"]
         if active_members:
             with st.form("member-revoke"):

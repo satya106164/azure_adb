@@ -69,8 +69,3 @@ def render(catalog: str, schema: str, request_app: str, admin_app: str) -> tuple
     optional = [f"GRANT USE CATALOG ON CATALOG {cat} TO {_principal(p)}" for p in (request_app, admin_app)]
     return must, optional
 
-
-def render_readers(catalog: str, schema: str, groups: list[str]) -> list[str]:
-    """Auditors and security read everything in the schema (reporting model included)."""
-    sch = f"{_ident(catalog)}.{_ident(schema)}"
-    return [f"GRANT USE SCHEMA, SELECT ON SCHEMA {sch} TO {_principal(g)}" for g in groups if g]

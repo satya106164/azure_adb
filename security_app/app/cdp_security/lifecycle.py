@@ -30,7 +30,7 @@ def send_expiry_notices(now: datetime | None = None) -> int:
     now = now or db.now()
     sent = 0
     for level, days in NOTICE_DAYS.items():
-        for r in fetch_all("SELECT * FROM v_grant WHERE status = 'ACTIVE' AND NOT is_break_glass "
+        for r in fetch_all("SELECT * FROM v_grant WHERE status = 'ACTIVE' "
                            "AND expiry_notice_level < :level AND valid_to <= :limit",
                            {"level": level, "limit": now + timedelta(days=days)}):
             if execute("UPDATE access_grant SET expiry_notice_level = :level WHERE grant_id = :id "
@@ -45,13 +45,13 @@ def send_expiry_notices(now: datetime | None = None) -> int:
 
 
 def escalate_overdue_tasks(now: datetime | None = None) -> dict[str, int]:
-    """First breach: escalate. Past auto_reject_after_hours: reject (never for break-glass reviews)."""
+    """First breach: escalate to the approvers and admins. Past auto_reject_after_hours: close it."""
     now = now or db.now()
     settings = get_settings()
     out = {"escalated": 0, "timed_out": 0}
     for t in fetch_all("SELECT * FROM v_task WHERE task_status = 'PENDING' AND due_at < :now", {"now": now}):
         overdue_hours = (now - t["due_at"]).total_seconds() / 3600
-        if not t["is_post_hoc"] and overdue_hours >= settings.auto_reject_after_hours:
+        if overdue_hours >= settings.auto_reject_after_hours:
             if execute("UPDATE approval_task SET status = 'EXPIRED', decided_at = current_timestamp(), "
                        "decision_comment = 'Not decided within SLA' WHERE task_id = :id AND status = 'PENDING'",
                        {"id": t["task_id"]}) != 1:
@@ -73,15 +73,13 @@ def escalate_overdue_tasks(now: datetime | None = None) -> dict[str, int]:
                 continue
             audit.record(ACTOR, "TASK_ESCALATED", "APPROVAL_TASK", t["task_id"], correlation_id=t["request_ref"])
             ctx = service.approval_context(t, service.get_group(t["group_code"]))
-            recipients = list(workflow.eligible_approvers(t["approver_role"], ctx)) \
-                if t["approver_role"] != "SECURITY" else []
+            recipients = list(workflow.eligible_approvers(t["approver_role"], ctx))
             subject = f"Overdue approval: {t['request_ref']}"
-            body = f"Stage {t['stage_no']} ({t['approver_role']}) was due {t['due_at']:%d %b %Y %H:%M} UTC."
+            body = (f"The approval for {t['beneficiary_email']} ({t['group_name']}) was due "
+                    f"{t['due_at']:%d %b %Y %H:%M} UTC. An admin can decide it on the Approvals page of "
+                    "Catalog admin if neither approver can.")
             notify.enqueue(recipients + [settings.admin_mailbox], subject, body, "TASK_ESCALATED",
                            request_id=t["request_id"], dedupe_key=f"escalate:{t['task_id']}")
-            if t["approver_role"] == "SECURITY" or t["is_post_hoc"]:
-                notify.security_alert(subject, body, "TASK_ESCALATED", request_id=t["request_id"],
-                                      dedupe_key=f"escalate-sec:{t['task_id']}")
             out["escalated"] += 1
     return out
 
@@ -116,10 +114,10 @@ def process_leavers_and_movers(graph, now: datetime | None = None) -> dict[str, 
                         "version = version + 1, updated_at = current_timestamp() WHERE request_id IN (:ids) "
                         "AND status IN ('DRAFT', 'PENDING_APPROVAL')", {"ids": open_ids})
             owned = fetch_all("SELECT data_product_code, name FROM data_product WHERE owner_email = :e "
-                              "OR steward_email = :e", {"e": u["email"]})
+                              "OR approver2_email = :e", {"e": u["email"]})
             if owned:
-                notify.admin_alert(f"Leaver owns or stewards {len(owned)} data product(s): {u['email']}",
-                                   "Set a new data owner / steward in Catalog admin: "
+                notify.admin_alert(f"Leaver approves {len(owned)} data product(s): {u['email']}",
+                                   "Set a new owner / approver or approver 2 in Catalog admin: "
                                    + ", ".join(f"{d['data_product_code']} {d['name']}" for d in owned),
                                    "LEAVER_OWNER", dedupe_key=f"leaver-owner:{u['email']}")
             out["leavers"] += 1

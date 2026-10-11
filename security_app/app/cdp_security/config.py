@@ -35,17 +35,13 @@ class Settings:
     catalog: str                  # existing UC catalog holding the app's schema
     schema: str                   # UC schema with all operational and reporting tables
     admin_group: str
-    security_group: str
-    auditor_group: str
-    break_glass_group: str
-    security_mailbox: str | None
     admin_mailbox: str | None
     app_url: str | None           # Data access (request) app URL, used in notifications
     admin_app_url: str | None     # Catalog admin app URL
     dry_run: bool                 # notifications are logged, not sent
-    break_glass_hours: int
-    break_glass_review_hours: int
     auto_reject_after_hours: int
+    approval_sla_hours: int       # business hours the approvers have to decide
+    recert_interval_days: int     # how often live access is reviewed
     recert_window_days: int
     holidays: frozenset[date]
     local_dev_user: str | None
@@ -68,18 +64,14 @@ def get_settings() -> Settings:
         catalog=_env("CDP_SECURITY_CATALOG", "dev_gold"),
         schema=_env("CDP_SECURITY_SCHEMA", "cdp_security"),
         admin_group=_env("CDP_SECURITY_ADMIN_GROUP", f"grp-dbx-{env}-app-cdp_security-admin"),
-        security_group=_env("CDP_SECURITY_SECURITY_GROUP", f"grp-dbx-{env}-app-cdp_security-security"),
-        auditor_group=_env("CDP_SECURITY_AUDITOR_GROUP", f"grp-dbx-{env}-app-cdp_security-auditor"),
-        break_glass_group=_env("CDP_SECURITY_BREAK_GLASS_GROUP", f"grp-dbx-{env}-app-cdp_security-breakglass"),
-        security_mailbox=_env("CDP_SECURITY_SECURITY_MAILBOX"),
         admin_mailbox=_env("CDP_SECURITY_ADMIN_MAILBOX"),
         app_url=_env("CDP_SECURITY_APP_URL"),
         admin_app_url=_env("CDP_SECURITY_ADMIN_APP_URL"),
-        # Safe default: no email or Teams message is sent unless explicitly enabled.
+        # Safe default: no email is sent unless explicitly enabled.
         dry_run=_bool("CDP_SECURITY_DRY_RUN", True),
-        break_glass_hours=int(_env("CDP_SECURITY_BREAK_GLASS_HOURS", "4")),
-        break_glass_review_hours=int(_env("CDP_SECURITY_BREAK_GLASS_REVIEW_HOURS", "24")),
         auto_reject_after_hours=int(_env("CDP_SECURITY_AUTO_REJECT_AFTER_HOURS", "240")),
+        approval_sla_hours=int(_env("CDP_SECURITY_APPROVAL_SLA_HOURS", "72")),
+        recert_interval_days=int(_env("CDP_SECURITY_RECERT_INTERVAL_DAYS", "365")),
         recert_window_days=int(_env("CDP_SECURITY_RECERT_WINDOW_DAYS", "14")),
         holidays=holidays,
         local_dev_user=_env("CDP_SECURITY_LOCAL_USER") if local else None,

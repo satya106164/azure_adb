@@ -15,7 +15,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)) if "__file__" in g
 from _common import bootstrap
 
 args = bootstrap()
+from cdp_security.config import get_settings  # noqa: E402
 from cdp_security.db import execute, fetch_one  # noqa: E402
+
+RECERT_INTERVAL_DAYS = int(get_settings().recert_interval_days)
 
 
 def dk(col: str) -> str:
@@ -81,7 +84,7 @@ execute(f"""
                FROM approval_task GROUP BY request_id) t ON t.request_id = r.request_id""")
 execute(f"""
     INSERT OVERWRITE fact_approval_event
-    SELECT t.task_id, t.request_id, t.stage_no, t.approver_role, t.status, t.is_post_hoc, dby.user_sk, obo.user_sk,
+    SELECT t.task_id, t.request_id, t.stage_no, t.approver_role, t.status, dby.user_sk, obo.user_sk,
            t.created_at, t.due_at, t.decided_at, {dk('t.decided_at')},
            (unix_timestamp(t.decided_at) - unix_timestamp(t.created_at)) / 3600.0,
            coalesce(t.decided_at, current_timestamp()) > t.due_at, t.escalated_at IS NOT NULL
@@ -91,7 +94,7 @@ execute(f"""
 execute(f"""
     INSERT OVERWRITE fact_grant_lifecycle
     SELECT gr.grant_id, gr.request_id, gu.user_sk, gr.group_code, g.data_product_code, r.classification_code,
-           gr.status, gr.is_break_glass, r.submitted_at, r.decided_at, gr.provisioned_at, gr.valid_to,
+           gr.status, r.submitted_at, r.decided_at, gr.provisioned_at, gr.valid_to,
            gr.last_recertified_at, gr.revoke_requested_at, gr.revoked_at, gr.revoke_reason,
            {dk('gr.provisioned_at')}, {dk('gr.revoked_at')},
            (unix_timestamp(gr.provisioned_at) - unix_timestamp(r.decided_at)) / 3600.0,
@@ -104,13 +107,12 @@ execute(f"""
 execute(f"""
     INSERT INTO fact_access_snapshot REPLACE WHERE snapshot_date = current_date()
     SELECT current_date(), {dk('current_date()')}, gr.grant_id, su.user_sk, gr.group_code, g.data_product_code,
-           g.classification_code, gr.is_break_glass, datediff(gr.valid_to, current_date()),
+           CAST(NULL AS STRING), datediff(gr.valid_to, current_date()),
            datediff(current_date(), coalesce(gr.last_recertified_at, gr.provisioned_at, gr.valid_from)),
            datediff(current_date(), coalesce(gr.last_recertified_at, gr.provisioned_at, gr.valid_from))
-             > c.recert_interval_days
+             > {RECERT_INTERVAL_DAYS}
     FROM access_grant gr
     JOIN v_group g ON g.group_code = gr.group_code
-    JOIN classification c ON c.classification_code = g.classification_code
     {uj('su', 'gr.user_email', 'current_timestamp()')}
     WHERE gr.status IN ('ACTIVE', 'PENDING_REVOKE')""")
 print("Reporting ETL complete")

@@ -22,20 +22,16 @@ resources:
             value: ${var.dry_run}
           - name: CDP_SECURITY_ADMIN_GROUP
             value: ${var.admin_group}
-          - name: CDP_SECURITY_SECURITY_GROUP
-            value: ${var.security_group}
-          - name: CDP_SECURITY_AUDITOR_GROUP
-            value: ${var.auditor_group}
-          - name: CDP_SECURITY_BREAK_GLASS_GROUP
-            value: ${var.break_glass_group}
-          - name: CDP_SECURITY_SECURITY_MAILBOX
-            value: ${var.security_mailbox}
           - name: CDP_SECURITY_ADMIN_MAILBOX
             value: ${var.admin_mailbox}
           - name: CDP_SECURITY_APP_URL
             value: ${var.app_url}
           - name: CDP_SECURITY_ADMIN_APP_URL
             value: ${var.admin_app_url}
+          - name: CDP_SECURITY_APPROVAL_SLA_HOURS
+            value: ${var.approval_sla_hours}
+          - name: CDP_SECURITY_RECERT_INTERVAL_DAYS
+            value: ${var.recert_interval_days}
       # Gives the app's service principal CAN_USE on the warehouse
       resources: &app_resources
         - name: sql-warehouse
@@ -62,7 +58,3 @@ resources:
       permissions:            # nobody else can even open it
         - group_name: ${var.admin_group}
           level: CAN_MANAGE
-        - group_name: ${var.auditor_group}
-          level: CAN_USE
-        - group_name: ${var.security_group}
-          level: CAN_USE

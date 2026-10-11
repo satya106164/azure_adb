@@ -9,15 +9,6 @@ from .db import fetch_all
 LIVE = ["PENDING_PROVISION", "ACTIVE", "PENDING_REVOKE"]
 
 
-def classifications() -> list[dict]:
-    return fetch_all("SELECT * FROM classification ORDER BY rank")
-
-
-def approval_rules(classification_code: str) -> list[dict]:
-    return fetch_all("SELECT * FROM approval_rule WHERE classification_code = :c ORDER BY stage_no",
-                     {"c": classification_code})
-
-
 def requestable_groups() -> list[dict]:
     return fetch_all("SELECT * FROM v_group WHERE requestable AND status = 'ACTIVE' "
                      "AND data_product_status = 'ACTIVE' ORDER BY data_product_name, group_name")
@@ -42,6 +33,11 @@ def my_decisions(email: str) -> list[dict]:
                      {"e": email})
 
 
+def pending_approvals() -> list[dict]:
+    """Every request waiting for its approvers, oldest due first (admin view)."""
+    return fetch_all("SELECT * FROM v_task WHERE task_status = 'PENDING' ORDER BY due_at")
+
+
 def request_tasks(request_id: str) -> list[dict]:
     return fetch_all("SELECT stage_no, approver_role, task_status, due_at, decided_by_email, task_decided_at, "
                      "decision_comment FROM v_task WHERE request_id = :id ORDER BY stage_no", {"id": request_id})
@@ -51,7 +47,7 @@ def recert_items_for(email: str) -> list[dict]:
     return fetch_all(
         """
         SELECT i.item_id, c.name AS campaign, c.due_at, i.reviewer_email,
-               g.user_email, g.group_name, g.classification_code, g.data_product_name,
+               g.user_email, g.group_name, g.data_product_name,
                g.valid_to, g.last_recertified_at, g.request_ref
         FROM recert_item i
         JOIN recert_campaign c ON c.campaign_id = i.campaign_id
@@ -91,9 +87,8 @@ def group_members(group_code: str) -> list[dict]:
 
 # ---- fulfilment (manual changes by admins) / audit -----------------------------
 def to_grant() -> list[dict]:
-    """Approved access an admin still has to add by hand; emergency access first."""
-    return fetch_all("SELECT * FROM v_grant WHERE status = 'PENDING_PROVISION' "
-                     "ORDER BY is_break_glass DESC, created_at")
+    """Approved access an admin still has to add by hand, oldest first."""
+    return fetch_all("SELECT * FROM v_grant WHERE status = 'PENDING_PROVISION' ORDER BY created_at")
 
 
 def to_remove() -> list[dict]:
@@ -101,7 +96,7 @@ def to_remove() -> list[dict]:
     return fetch_all("SELECT *, CASE WHEN status = 'ACTIVE' THEN 'EXPIRED' ELSE revoke_reason END AS why "
                      "FROM v_grant WHERE status = 'PENDING_REVOKE' "
                      "OR (status = 'ACTIVE' AND valid_to <= current_timestamp()) "
-                     "ORDER BY is_break_glass DESC, coalesce(revoke_requested_at, valid_to)")
+                     "ORDER BY coalesce(revoke_requested_at, valid_to)")
 
 
 def recent_manual_changes(days: int = 30) -> list[dict]:
@@ -137,8 +132,8 @@ def access_evidence() -> list[dict]:
     """Every live grant with its approval trail - recertification evidence pack (FR-51)."""
     return fetch_all(
         """
-        SELECT g.user_email, g.group_name, g.classification_code, g.data_product_code, g.data_product_name,
-               g.data_product_type, g.status, g.is_break_glass, g.valid_from, g.valid_to, g.last_recertified_at,
+        SELECT g.user_email, g.group_name, g.data_product_code, g.data_product_name,
+               g.data_product_type, g.status, g.valid_from, g.valid_to, g.last_recertified_at,
                g.request_ref, a.approvals, g.provisioned_at AS granted_at, g.provisioned_by AS granted_by
         FROM v_grant g
         LEFT JOIN (
@@ -152,15 +147,14 @@ def access_evidence() -> list[dict]:
 
 
 def owned_data_products(email: str) -> list[dict]:
-    """Data products this person is the data owner or steward of."""
-    return fetch_all("SELECT data_product_code, name, data_product_type, project_name, catalog_name, schema_name, "
-                     "classification_code, "
-                     "CASE WHEN owner_email = :e THEN 'DATA_OWNER' ELSE 'STEWARD' END AS role "
-                     "FROM data_product WHERE owner_email = :e OR steward_email = :e ORDER BY data_product_seq",
+    """Data products this person approves (as owner / approver or approver 2)."""
+    return fetch_all("SELECT data_product_code, name, data_product_type, environment, project_name, catalog_name, "
+                     "schema_name, CASE WHEN owner_email = :e THEN 'Owner / approver' ELSE 'Approver 2' END AS role "
+                     "FROM data_product WHERE owner_email = :e OR approver2_email = :e ORDER BY data_product_seq",
                      {"e": email})
 
 
 def grants_for_owned(email: str) -> list[dict]:
-    """Live grants on the data products this person owns or stewards."""
-    return fetch_all("SELECT * FROM v_grant WHERE status IN (:live) AND (owner_email = :e OR steward_email = :e) "
+    """Live grants on the data products this person approves."""
+    return fetch_all("SELECT * FROM v_grant WHERE status IN (:live) AND (owner_email = :e OR approver2_email = :e) "
                      "ORDER BY data_product_name, user_email", {"live": LIVE, "e": email})

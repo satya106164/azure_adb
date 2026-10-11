@@ -16,10 +16,9 @@ GRANT USE CATALOG, CREATE SCHEMA ON CATALOG <app_catalog> TO `<jobs-sp-applicati
 GRANT USE CATALOG ON CATALOG <app_catalog> TO `<request-app-sp-application-id>`;
 GRANT USE CATALOG ON CATALOG <app_catalog> TO `<admin-app-sp-application-id>`;
 
--- Readers of the whole schema, reporting model included (contains user emails - keep it narrow).
--- The migrate job grants USE SCHEMA, SELECT on the schema to these groups.
-GRANT USE CATALOG ON CATALOG <app_catalog> TO `grp-dbx-<env>-app-cdp_security-auditor`;
-GRANT USE CATALOG ON CATALOG <app_catalog> TO `grp-dbx-<env>-app-cdp_security-security`;
+-- Admin app SP: list catalogs and schemas when registering a data product (metadata only, no data).
+-- Repeat for every catalog admins should be able to pick; a catalog without it can still be typed in.
+GRANT BROWSE ON CATALOG <data_catalog> TO `<admin-app-sp-application-id>`;
 
 -- SQL warehouse: the jobs SP needs CAN_USE on the warehouse (Warehouse > Permissions).
 -- The apps get CAN_USE through their sql_warehouse resource in resources/app.yml.

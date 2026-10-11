@@ -7,9 +7,8 @@ import streamlit as st
 from cdp_security import queries, service, ui
 from cdp_security.models import AppRole
 
-user = ui.require(AppRole.ADMIN, AppRole.AUDITOR, AppRole.SECURITY)
-st.title("Audit")
-ui.show_flash()
+user = ui.require(AppRole.ADMIN)
+ui.page_header("Audit", "audit")
 
 
 def to_csv(rows: list[dict]) -> bytes:
@@ -44,8 +43,6 @@ with tab_audit:
             st.success("Audit chain verified: no gaps and every hash matches.")
 
 with tab_evidence:
-    st.caption("Every live grant with its approval trail and who added the member. Use for recertification "
-               "evidence and regulator requests.")
     evidence = queries.access_evidence()
     ui.table(evidence)
     st.download_button("Download evidence CSV", to_csv(evidence),

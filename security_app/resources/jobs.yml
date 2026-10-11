@@ -35,8 +35,6 @@ resources:
               - ${resources.apps.cdp_security_request_app.service_principal_client_id}
               - --admin-app-sp
               - ${resources.apps.cdp_security_admin_app.service_principal_client_id}
-              - --reader-groups
-              - ${var.auditor_group},${var.security_group}
 
     cdp_security_notify:
       name: cdp_security-notify-${var.env_code}
@@ -67,12 +65,14 @@ resources:
               - ${var.secret_scope}
               - --dry-run
               - ${var.dry_run}
-              - --security-mailbox
-              - ${var.security_mailbox}
               - --admin-mailbox
               - ${var.admin_mailbox}
               - --app-url
               - ${var.app_url}
+              - --admin-app-url
+              - ${var.admin_app_url}
+              - --recert-interval-days
+              - ${var.recert_interval_days}
 
     cdp_security_daily:
       name: cdp_security-daily-${var.env_code}

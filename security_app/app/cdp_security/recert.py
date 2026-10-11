@@ -1,5 +1,5 @@
 """Recertification campaigns. Periodic campaigns are monthly buckets; each grant
-enters one when it is within `recert_window_days` of its interval. Items not
+enters one when it is within `recert_window_days` of `recert_interval_days`. Items not
 attested by the campaign due date are revoked (fail closed)."""
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 from . import audit, db, notify, service, workflow
 from .config import get_settings
 from .db import execute, fetch_all, fetch_one
-from .models import ApproverRole, CurrentUser, RevokeReason
+from .models import CurrentUser, RevokeReason
 
 log = logging.getLogger(__name__)
 ACTOR = CurrentUser.system("recertification")
@@ -31,13 +31,11 @@ def _campaign(ctype: str, now: datetime, due_days: int) -> dict:
 
 
 def _add_item(campaign: dict, grant: dict) -> bool:
-    holders = service.owners_for_group(grant)
-    reviewer = workflow.choose_reviewer(grant["user_email"], holders.get(ApproverRole.DATA_OWNER, set()),
-                                        holders.get(ApproverRole.STEWARD, set()))
+    reviewer = workflow.choose_reviewer(grant["user_email"], service.active_approvers(grant))
     if reviewer is None:
         notify.admin_alert(f"No reviewer for {grant['group_name']}",
                            f"Grant for {grant['user_email']} cannot be recertified: the data product has no active "
-                           "owner or steward other than the grantee. Set one in Catalog admin.", "RECERT_NO_REVIEWER",
+                           "approver other than the grantee. Set one in Catalog admin.", "RECERT_NO_REVIEWER",
                            dedupe_key=f"noreviewer:{grant['grant_id']}:{campaign['campaign_id']}")
         return False
     service.ensure_user(reviewer)
@@ -52,13 +50,13 @@ def open_periodic(now: datetime | None = None, due_days: int = 14) -> int:
     now = now or db.now()
     settings = get_settings()
     candidates = fetch_all("""
-        SELECT v.*, c.recert_interval_days,
-               coalesce(v.last_recertified_at, v.provisioned_at, v.valid_from) AS last_attested
-        FROM v_grant v JOIN classification c ON c.classification_code = v.classification_code
-        WHERE v.status = 'ACTIVE' AND NOT v.is_break_glass
+        SELECT v.*, coalesce(v.last_recertified_at, v.provisioned_at, v.valid_from) AS last_attested
+        FROM v_grant v
+        WHERE v.status = 'ACTIVE'
           AND NOT EXISTS (SELECT 1 FROM recert_item i WHERE i.grant_id = v.grant_id AND i.decision = 'PENDING')""")
     due = [g for g in candidates
-           if workflow.recert_due(g["last_attested"], g["recert_interval_days"], settings.recert_window_days, now)]
+           if workflow.recert_due(g["last_attested"], settings.recert_interval_days, settings.recert_window_days,
+                                  now)]
     if not due:
         return 0
     campaign = _campaign("PERIODIC", now, due_days)
@@ -71,7 +69,7 @@ def open_periodic(now: datetime | None = None, due_days: int = 14) -> int:
 
 def add_mover_review(user_email: str, now: datetime | None = None) -> int:
     now = now or db.now()
-    grants = fetch_all("SELECT * FROM v_grant v WHERE v.user_email = :e AND v.status = 'ACTIVE' AND NOT v.is_break_glass "
+    grants = fetch_all("SELECT * FROM v_grant v WHERE v.user_email = :e AND v.status = 'ACTIVE' "
                        "AND NOT EXISTS (SELECT 1 FROM recert_item i WHERE i.grant_id = v.grant_id "
                        "AND i.decision = 'PENDING')", {"e": user_email})
     if not grants:

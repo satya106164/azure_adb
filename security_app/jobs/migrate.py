@@ -16,8 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)) if "__file__" in g
 
 from _common import bootstrap
 
-args = bootstrap([("--request-app-sp", {"default": ""}), ("--admin-app-sp", {"default": ""}),
-                  ("--reader-groups", {"default": ""})])
+args = bootstrap([("--request-app-sp", {"default": ""}), ("--admin-app-sp", {"default": ""})])
 from cdp_security import appgrants, db  # noqa: E402
 
 log = logging.getLogger("migrate")
@@ -61,9 +60,4 @@ if args.request_app_sp and args.admin_app_sp:
 else:
     log.warning("App service principals not passed: app grants NOT applied.")
 
-for stmt in appgrants.render_readers(args.catalog, args.schema, [g for g in args.reader_groups.split(",") if g]):
-    try:
-        db.execute(stmt)
-    except Exception as exc:  # noqa: BLE001 - e.g. the group does not exist yet in this workspace
-        log.warning("Could not run %s (%s)", stmt, str(exc)[:200])
 log.info("Migrations complete")
