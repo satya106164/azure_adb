@@ -12,7 +12,7 @@ from typing import Iterable
 from zoneinfo import ZoneInfo
 
 from .models import (
-    ApproverRole, AppRole, GrantStatus, RequestStatus, RequestType, RevokeReason,
+    ApproverRole, AppRole, GrantStatus, RequestStatus, RevokeReason,
 )
 
 RS = RequestStatus
@@ -34,34 +34,27 @@ class ConfigurationError(Exception):
 REQUEST_TRANSITIONS: dict[tuple[RequestStatus, str], RequestStatus] = {
     (RS.DRAFT, "submit"): RS.PENDING_APPROVAL,
     (RS.DRAFT, "cancel"): RS.CANCELLED,
-    (RS.DRAFT, "break_glass"): RS.APPROVED,
     (RS.PENDING_APPROVAL, "approve_stage"): RS.PENDING_APPROVAL,
     (RS.PENDING_APPROVAL, "approve_final"): RS.APPROVED,
     (RS.PENDING_APPROVAL, "reject"): RS.REJECTED,
     (RS.PENDING_APPROVAL, "timeout"): RS.REJECTED,
     (RS.PENDING_APPROVAL, "cancel"): RS.CANCELLED,
-    (RS.APPROVED, "start_provisioning"): RS.PROVISIONING,
-    (RS.APPROVED, "extended"): RS.FULFILLED,          # EXTEND requests need no provisioning
-    (RS.PROVISIONING, "provisioned"): RS.FULFILLED,
-    (RS.PROVISIONING, "provision_failed"): RS.PROVISIONING_FAILED,
-    (RS.PROVISIONING_FAILED, "retry"): RS.APPROVED,
-    (RS.PROVISIONING_FAILED, "cancel"): RS.CANCELLED,
+    (RS.APPROVED, "extended"): RS.FULFILLED,          # EXTEND requests need no change to the group
+    (RS.APPROVED, "granted"): RS.FULFILLED,           # an admin added the member by hand
+    (RS.APPROVED, "withdraw"): RS.CANCELLED,          # group retired / person left before it was done
 }
 
 # Who may raise each event
 REQUEST_EVENT_ACTORS: dict[str, frozenset[str]] = {
     "submit": frozenset({"requester"}),
-    "break_glass": frozenset({"break_glass"}),
-    "cancel": frozenset({"requester", "admin"}),
+    "cancel": frozenset({"requester", "admin", "system"}),  # system: request became pointless
     "approve_stage": frozenset({"approver"}),
     "approve_final": frozenset({"approver"}),
     "reject": frozenset({"approver"}),
     "timeout": frozenset({"system"}),
-    "start_provisioning": frozenset({"system"}),
     "extended": frozenset({"system", "approver"}),
-    "provisioned": frozenset({"system"}),
-    "provision_failed": frozenset({"system"}),
-    "retry": frozenset({"admin"}),
+    "granted": frozenset({"admin"}),
+    "withdraw": frozenset({"admin", "system"}),
 }
 
 TERMINAL_REQUEST_STATES = frozenset({RS.FULFILLED, RS.REJECTED, RS.CANCELLED})
@@ -83,10 +76,10 @@ def next_request_status(current: RequestStatus | str, event: str, actor_kind: st
 # ---------------------------------------------------------------------------
 # Grant state machine
 # ---------------------------------------------------------------------------
+# The app never changes a group itself: an admin does it by hand and marks it done ("granted", "removed").
 GRANT_TRANSITIONS: dict[tuple[GrantStatus, str], GrantStatus] = {
-    (GS.PENDING_PROVISION, "provisioned"): GS.ACTIVE,
-    (GS.PENDING_PROVISION, "provision_failed"): GS.FAILED,
-    (GS.FAILED, "retry"): GS.PENDING_PROVISION,
+    (GS.PENDING_PROVISION, "granted"): GS.ACTIVE,
+    (GS.PENDING_PROVISION, "withdraw"): GS.REVOKED,   # never added, so nothing to remove
     (GS.ACTIVE, "extend"): GS.ACTIVE,
     (GS.ACTIVE, "recertify"): GS.ACTIVE,
     (GS.ACTIVE, "revoke"): GS.PENDING_REVOKE,
@@ -111,24 +104,13 @@ def next_grant_status(current: GrantStatus | str, event: str,
 @dataclass(frozen=True, order=True)
 class ApprovalRule:
     stage_no: int
-    classification: str
     approver_role: ApproverRole
     sla_hours: int
 
 
-def plan_stages(rules: Iterable[ApprovalRule], classification: str,
-                request_type: RequestType | str) -> list[ApprovalRule]:
-    """Ordered approval stages for a request. Fails closed if none are configured."""
-    request_type = RequestType(request_type)
-    if request_type == RequestType.BREAK_GLASS:
-        return []  # approved immediately; reviewed post hoc by SECURITY
-    stages = sorted(r for r in rules if r.classification == classification)
-    if not stages:
-        raise ConfigurationError(f"No approval rules configured for classification {classification}")
-    numbers = [s.stage_no for s in stages]
-    if numbers != list(range(1, len(numbers) + 1)):
-        raise ConfigurationError(f"Approval stages for {classification} must be 1..n without gaps, got {numbers}")
-    return stages
+def plan_stages(sla_hours: int) -> list[ApprovalRule]:
+    """Approval stages for a request (new or extension): one, decided by either of the data product's approvers."""
+    return [ApprovalRule(1, ApproverRole.APPROVER, sla_hours)]
 
 
 def _norm(email: str | None) -> str:
@@ -140,7 +122,7 @@ class ApprovalContext:
     """Everything needed to decide who may approve a given request."""
     requester: str
     beneficiary: str
-    # Named approvers per role (SECURITY is satisfied by app role instead).
+    # Named approvers per role
     role_holders: dict[ApproverRole, set[str]] = field(default_factory=dict)
     # delegator email -> set of delegate emails, active now
     delegations: dict[str, set[str]] = field(default_factory=dict)
@@ -185,14 +167,19 @@ def can_decide(actor_email: str, actor_roles: Iterable[AppRole], stage_role: App
         return False, "You cannot approve a request you raised or that grants access to you.", None
     if ctx.distinct_approvers and actor in {_norm(e) for e in ctx.prior_approvers}:
         return False, "You already approved an earlier stage; a different person must approve this stage.", None
-    if stage_role == ApproverRole.SECURITY:
-        if AppRole.SECURITY in set(actor_roles):
-            return True, "Security approver", None
-        return False, "This stage needs a member of the security approvers group.", None
     eligible = eligible_approvers(stage_role, ctx)
     if actor in eligible:
         return True, "Eligible approver", eligible[actor]
-    return False, f"You are not a {stage_role.value.replace('_', ' ').lower()} (or delegate) for this access.", None
+    return False, "You are not an approver (or their delegate) for this data product.", None
+
+
+def can_override(actor_email: str, actor_roles: Iterable[AppRole], ctx: ApprovalContext) -> tuple[bool, str]:
+    """An admin may decide in place of the approvers, but never on a request they raised or that is for them."""
+    if AppRole.ADMIN not in set(actor_roles):
+        return False, "Only an admin can decide on behalf of the approvers."
+    if _norm(actor_email) in {_norm(ctx.requester), _norm(ctx.beneficiary)}:
+        return False, "You cannot decide a request you raised or that grants access to you."
+    return True, "Admin override"
 
 
 # ---------------------------------------------------------------------------
@@ -220,20 +207,10 @@ def add_business_hours(start: datetime, hours: int, holidays: frozenset[date] = 
     return cur.astimezone(timezone.utc)
 
 
-def effective_valid_to(start: datetime, requested_days: int | None, max_days: int,
-                       project_end: date | None = None, request_type: RequestType | str = RequestType.GRANT,
-                       break_glass_hours: int = 4) -> datetime:
-    """Grant end: min(requested, classification max, project end). Break-glass is hours, not days."""
-    if RequestType(request_type) == RequestType.BREAK_GLASS:
-        return start + timedelta(hours=break_glass_hours)
-    days = max_days if not requested_days else min(int(requested_days), max_days)
-    end = start + timedelta(days=days)
-    if project_end is not None:
-        project_cut = datetime.combine(project_end, time(23, 59, 59), tzinfo=timezone.utc)
-        end = min(end, project_cut)
-    if end <= start:
-        raise TransitionError("The project has ended; access cannot be granted for it.")
-    return end
+def effective_valid_to(start: datetime, requested_days: int | None, default_days: int) -> datetime:
+    """Grant end: the requested number of days (no upper limit; default_days if none was given)."""
+    days = int(requested_days) if requested_days else default_days
+    return start + timedelta(days=max(days, 1))
 
 
 def recert_due(last_attested: datetime, interval_days: int, window_days: int, now: datetime) -> bool:
@@ -241,12 +218,11 @@ def recert_due(last_attested: datetime, interval_days: int, window_days: int, no
     return last_attested + timedelta(days=interval_days) - timedelta(days=window_days) <= now
 
 
-def choose_reviewer(grantee: str, owners: Iterable[str], stewards: Iterable[str],
-                    group_owner: str | None) -> str | None:
-    """Pick a recertification reviewer who is not the grantee (owner > steward > group owner)."""
+def choose_reviewer(grantee: str, approvers: Iterable[str | None]) -> str | None:
+    """Pick a recertification reviewer who is not the grantee: the first of the approvers, in order
+    (owner / approver, then approver 2)."""
     g = _norm(grantee)
-    for pool in (sorted(owners), sorted(stewards), [group_owner] if group_owner else []):
-        for candidate in pool:
-            if _norm(candidate) and _norm(candidate) != g:
-                return _norm(candidate)
+    for candidate in approvers:
+        if _norm(candidate) and _norm(candidate) != g:
+            return _norm(candidate)
     return None

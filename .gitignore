@@ -1,0 +1,22 @@
+# macOS
+.DS_Store
+._*
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+
+# Databricks bundle state and build output
+.databricks/
+build/
+dist/
+
+# Local environment and secrets
+.env
+.env.*
+*.pem

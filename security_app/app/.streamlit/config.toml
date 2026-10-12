@@ -1,10 +1,45 @@
 [theme]
+# Brand palette built around the Standard Life logo: navy #0A2F73 and yellow #FFBB00
+# (app/static/brand). Navy carries actions and links; yellow is an accent only, as
+# yellow text on white is not readable. Status badges use the named colours below.
 base = "light"
-primaryColor = "#1F5C4A"
+primaryColor = "#0A2F73"
 backgroundColor = "#FFFFFF"
-secondaryBackgroundColor = "#F1F4F2"
-textColor = "#1B2420"
+secondaryBackgroundColor = "#F3F6FB"
+textColor = "#1B2333"
+linkColor = "#0A2F73"
+borderColor = "#D5DDEB"
+showWidgetBorder = true
+showSidebarBorder = true
+baseRadius = "small"
 font = "sans serif"
+dataframeHeaderBackgroundColor = "#E6ECF6"
+dataframeHeaderTextColor = "#0A2F73"
+
+# Status badge colours (ui.STATUS_COLOURS): blue = approved / in hand, orange = waiting,
+# green = done, red = rejected, gray = closed
+blueColor = "#0A2F73"
+blueBackgroundColor = "#E6ECF6"
+blueTextColor = "#0A2F73"
+orangeColor = "#FFBB00"
+orangeBackgroundColor = "#FFF4D6"
+orangeTextColor = "#7A4F00"
+yellowColor = "#FFBB00"
+yellowBackgroundColor = "#FFF4D6"
+yellowTextColor = "#7A4F00"
+greenColor = "#1E7B4F"
+greenBackgroundColor = "#E5F3EC"
+greenTextColor = "#1E7B4F"
+redColor = "#B42318"
+redBackgroundColor = "#FBE9E7"
+redTextColor = "#B42318"
+grayColor = "#5B6577"
+grayBackgroundColor = "#EEF0F4"
+grayTextColor = "#5B6577"
+
+[theme.sidebar]
+backgroundColor = "#EEF2F9"
+secondaryBackgroundColor = "#FFFFFF"
 
 [server]
 headless = true

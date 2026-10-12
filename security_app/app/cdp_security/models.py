@@ -13,16 +13,13 @@ class _StrEnum(str, Enum):
 class RequestType(_StrEnum):
     GRANT = "GRANT"
     EXTEND = "EXTEND"
-    BREAK_GLASS = "BREAK_GLASS"
 
 
 class RequestStatus(_StrEnum):
     DRAFT = "DRAFT"
     PENDING_APPROVAL = "PENDING_APPROVAL"
-    APPROVED = "APPROVED"
-    PROVISIONING = "PROVISIONING"
+    APPROVED = "APPROVED"          # approved; an admin has still to add the member
     FULFILLED = "FULFILLED"
-    PROVISIONING_FAILED = "PROVISIONING_FAILED"
     REJECTED = "REJECTED"
     CANCELLED = "CANCELLED"
 
@@ -36,12 +33,11 @@ class TaskStatus(_StrEnum):
 
 
 class GrantStatus(_StrEnum):
-    PENDING_PROVISION = "PENDING_PROVISION"
+    PENDING_PROVISION = "PENDING_PROVISION"  # an admin adds the member by hand, then marks it granted
     ACTIVE = "ACTIVE"
-    PENDING_REVOKE = "PENDING_REVOKE"
+    PENDING_REVOKE = "PENDING_REVOKE"        # an admin removes the member by hand, then marks it removed
     REVOKED = "REVOKED"
     EXPIRED = "EXPIRED"
-    FAILED = "FAILED"
 
 
 class RevokeReason(_StrEnum):
@@ -52,37 +48,15 @@ class RevokeReason(_StrEnum):
     RECERT_REVOKE = "RECERT_REVOKE"
     RECERT_NOT_ATTESTED = "RECERT_NOT_ATTESTED"
     LEAVER = "LEAVER"
-    POST_HOC_REJECTED = "POST_HOC_REJECTED"
     GROUP_RETIRED = "GROUP_RETIRED"
 
 
 class ApproverRole(_StrEnum):
-    DATA_OWNER = "DATA_OWNER"
-    STEWARD = "STEWARD"
-    SECURITY = "SECURITY"
-    PROJECT_SPONSOR = "PROJECT_SPONSOR"
+    APPROVER = "APPROVER"    # the data product's owner / approver or approver 2
 
 
 class AppRole(_StrEnum):
-    """Global roles. Data owner / steward / sponsor are contextual (per object)."""
-    ADMIN = "ADMIN"
-    SECURITY = "SECURITY"
-    AUDITOR = "AUDITOR"
-    BREAK_GLASS = "BREAK_GLASS"
-
-
-class GroupPurpose(_StrEnum):
-    DATA_PRODUCT = "DATA_PRODUCT"
-    PROJECT = "PROJECT"
-    AI_USE_CASE = "AI_USE_CASE"
-    WORKSPACE = "WORKSPACE"
-
-
-class PrivilegeLevel(_StrEnum):
-    READ = "READ"
-    WRITE = "WRITE"
-    CONTRIB = "CONTRIB"
-    USER = "USER"
+    """Global roles, from Entra group membership. Approvers are per data product."""
     ADMIN = "ADMIN"
 
 

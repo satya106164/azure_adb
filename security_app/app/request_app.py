@@ -1,4 +1,4 @@
-"""Data access app (everyone): request, approve, review, emergency access, owner tools."""
+"""Data access app (everyone): request, approve, review, approver tools."""
 import logging
 
 import streamlit as st
@@ -13,14 +13,11 @@ st.set_page_config(page_title="Data access", page_icon=":material/shield_person:
 settings = get_settings()
 user = ui.user()
 
-access = [
-    st.Page("views/my_access.py", title="My access", icon=":material/badge:", default=True),
-    st.Page("views/request_access.py", title="Request access", icon=":material/add_moderator:"),
-]
-if user.has(AppRole.BREAK_GLASS):
-    access.append(st.Page("views/break_glass.py", title="Emergency access", icon=":material/emergency:"))
 pages = {
-    "Access": access,
+    "Access": [
+        st.Page("views/my_access.py", title="My access", icon=":material/badge:", default=True),
+        st.Page("views/request_access.py", title="Request access", icon=":material/add_moderator:"),
+    ],
     "Reviews": [
         st.Page("views/approvals.py", title="Approvals", icon=":material/fact_check:"),
         st.Page("views/recertification.py", title="Access reviews", icon=":material/event_repeat:"),
@@ -29,7 +26,7 @@ pages = {
 }
 
 admin_link = None
-if any(user.has(r) for r in (AppRole.ADMIN, AppRole.AUDITOR, AppRole.SECURITY)):
+if user.has(AppRole.ADMIN):
     admin_link = ("Open Catalog admin", settings.admin_app_url)
 ui.sidebar(user, "Data access", admin_link)
 st.navigation(pages).run()

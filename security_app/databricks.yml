@@ -18,44 +18,26 @@ include:
 
 variables:
   catalog:
-    description: EXISTING UC catalog for the Delta reporting / audit model (the bundle never creates catalogs)
+    description: EXISTING UC catalog holding the app's schema (the bundle never creates catalogs)
     default: dev_gold
   schema:
-    description: UC schema in `catalog` for the reporting / audit model (created by the migrate job if missing)
+    description: UC schema for all of the app's Delta tables (created by the migrate job if missing)
     default: cdp_security
+  warehouse_id:
+    description: SQL warehouse that both apps and all jobs use for every read and write
   env_code:
     description: Environment code used in group names (dev | tst | prd)
     default: dev
-  lakebase_instance:
-    description: Lakebase database instance name
-    default: cdp-security-dev
-  lakebase_capacity:
-    default: CU_1
-  lakebase_database:
-    description: Postgres database in the Lakebase instance (the built-in one; nothing else creates databases)
-    default: databricks_postgres
   secret_scope:
-    description: Key Vault-backed secret scope holding Graph / Power BI / Teams credentials
+    description: Key Vault-backed secret scope holding the Graph credentials and mail sender
     default: cdp_security
-  provisioning_sp:
-    description: Application id of the provisioning service principal (jobs run as this)
+  jobs_sp:
+    description: Application id of the service principal the jobs run as
   dry_run:
-    description: "true = record decisions but change nothing in Entra / UC / Power BI"
+    description: "true = notifications are logged, not sent (the app never changes groups or grants)"
     default: "true"
-  graph_create_groups:
-    description: "true = the app creates Entra groups; false = identity team creates them and admins record the object id"
-    default: "false"
   admin_group:
     default: grp-dbx-dev-app-cdp_security-admin
-  security_group:
-    default: grp-dbx-dev-app-cdp_security-security
-  auditor_group:
-    default: grp-dbx-dev-app-cdp_security-auditor
-  break_glass_group:
-    default: grp-dbx-dev-app-cdp_security-breakglass
-  security_mailbox:
-    description: Security alerts mailbox. Must be non-empty (Apps reject empty env values)
-    default: ""
   admin_mailbox:
     description: Admin alerts mailbox. Must be non-empty (Apps reject empty env values)
     default: ""
@@ -65,51 +47,30 @@ variables:
   admin_app_url:
     description: URL of the Catalog admin app
     default: ""
-  request_app_role:
-    description: Postgres role of the request app's service principal (its application id). Set after first deploy
-    default: ""
-  admin_app_role:
-    description: Postgres role of the admin app's service principal (its application id). Set after first deploy
-    default: ""
-  lakebase_auditor_role:
-    description: Optional Postgres role (Databricks group) with read-only access to the schema
-    default: ""
-  drift_allowlist:
-    description: Comma-separated principals allowed to hold grants outside the app (e.g. platform admins group)
-    default: ""
   schedule_pause_status:
-    description: PAUSED | UNPAUSED for the provisioning and daily job schedules
+    description: PAUSED | UNPAUSED for the notification and daily job schedules
     default: UNPAUSED
-  provisioning_job_id:
-    description: Job id of cdp_security-provisioning (set after first deploy so the App can trigger it)
-    default: "0"   # "0" = not set yet; Apps reject empty env values
+  approval_sla_hours:
+    description: Business hours the data product's approvers have to decide a request
+    default: "72"
+  recert_interval_days:
+    description: How often live access is reviewed by the data product's approvers
+    default: "365"
 
 targets:
   dev:
     mode: development
     default: true
     workspace:
-      host: https://adb-7405607693517995.15.azuredatabricks.net   # hosts the app; deploy with OAuth U2M (databricks auth login)
+      host: https://adb-7405607693517995.15.azuredatabricks.net   # hosts the apps; deploy with OAuth U2M (databricks auth login)
     variables:
-      provisioning_sp: 00000000-0000-0000-0000-000000000000   # not used in dev: jobs run as the deploying OAuth user
+      warehouse_id: 3563e74db5969657   # Serverless Starter Warehouse
+      jobs_sp: 00000000-0000-0000-0000-000000000000   # not used in dev: jobs run as the deploying OAuth user
       schedule_pause_status: PAUSED   # run jobs on demand in dev (bundle run); avoids 96 serverless runs a day
-      # Each app's service principal is its Postgres role (README step 3)
-      request_app_role: ${resources.apps.cdp_security_request_app.service_principal_client_id}
-      admin_app_role: ${resources.apps.cdp_security_admin_app.service_principal_client_id}
-      provisioning_job_id: "1075004154293681"   # README step 6: cdp_security-provisioning-dev, set after first deploy
       # Apps reject env vars with an empty value; dev alerts go to the deployer (dry run: nothing is sent)
-      security_mailbox: ${workspace.current_user.userName}
       admin_mailbox: ${workspace.current_user.userName}
       app_url: https://cdp-security-dev-7405607693517995.15.azure.databricksapps.com
       admin_app_url: https://cdp-security-admin-dev-7405607693517995.15.azure.databricksapps.com
-    resources:
-      jobs:
-        cdp_security_provisioning:
-          permissions:   # both apps start provisioning straight after an approval / retry
-            - service_principal_name: ${var.request_app_role}
-              level: CAN_MANAGE_RUN
-            - service_principal_name: ${var.admin_app_role}
-              level: CAN_MANAGE_RUN
 
   tst:
     mode: production
@@ -117,16 +78,13 @@ targets:
       host: https://adb-1111111111111111.1.azuredatabricks.net
       root_path: /Workspace/Shared/.bundle/${bundle.name}/${bundle.target}
     run_as:
-      service_principal_name: ${var.provisioning_sp}
+      service_principal_name: ${var.jobs_sp}
     variables:
       env_code: tst
-      lakebase_instance: cdp-security-tst
-      # catalog: <existing tst catalog>   # set before deploying tst; the bundle never creates catalogs
-      provisioning_sp: 11111111-1111-1111-1111-111111111111
+      # catalog: <existing tst catalog>       # set before deploying tst; the bundle never creates catalogs
+      # warehouse_id: <tst SQL warehouse id>  # required
+      jobs_sp: 11111111-1111-1111-1111-111111111111
       admin_group: grp-dbx-tst-app-cdp_security-admin
-      security_group: grp-dbx-tst-app-cdp_security-security
-      auditor_group: grp-dbx-tst-app-cdp_security-auditor
-      break_glass_group: grp-dbx-tst-app-cdp_security-breakglass
       dry_run: "false"
 
   prd:
@@ -135,18 +93,14 @@ targets:
       host: https://adb-2222222222222222.2.azuredatabricks.net
       root_path: /Workspace/Shared/.bundle/${bundle.name}/${bundle.target}
     run_as:
-      service_principal_name: ${var.provisioning_sp}
+      service_principal_name: ${var.jobs_sp}
     permissions:
       - group_name: grp-dbx-prd-app-cdp_security-admin
         level: CAN_VIEW
     variables:
       env_code: prd
-      lakebase_instance: cdp-security-prd
-      lakebase_capacity: CU_2
-      # catalog: <existing prd catalog>   # set before deploying prd; the bundle never creates catalogs
-      provisioning_sp: 22222222-2222-2222-2222-222222222222
+      # catalog: <existing prd catalog>       # set before deploying prd; the bundle never creates catalogs
+      # warehouse_id: <prd SQL warehouse id>  # required
+      jobs_sp: 22222222-2222-2222-2222-222222222222
       admin_group: grp-dbx-prd-app-cdp_security-admin
-      security_group: grp-dbx-prd-app-cdp_security-security
-      auditor_group: grp-dbx-prd-app-cdp_security-auditor
-      break_glass_group: grp-dbx-prd-app-cdp_security-breakglass
       dry_run: "false"

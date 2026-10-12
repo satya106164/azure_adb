@@ -1,4 +1,6 @@
-# All jobs: serverless, run as the provisioning service principal (target run_as).
+# All jobs: serverless, run as the jobs service principal (target run_as; in dev, the deployer).
+# They read and write the Delta tables through the same SQL warehouse as the apps, and never
+# change groups or grants: admins do that by hand and record it in the Catalog admin app.
 resources:
   jobs:
     cdp_security_migrate:
@@ -8,55 +10,35 @@ resources:
           spec:
             client: "2"
             dependencies:
-              - psycopg[binary]>=3.2,<4
-              - psycopg-pool>=3.2,<4
+              - databricks-sql-connector>=3.4,<5
+              - databricks-sdk>=0.60
               - azure-identity>=1.17
               - requests>=2.31
-              - databricks-sdk>=0.60
       tasks:
         - task_key: migrate
           environment_key: default
           spark_python_task:
             python_file: ../jobs/migrate.py
-            parameters: &params
+            parameters:
               - --bundle-root
               - ${workspace.file_path}
               - --env
               - ${var.env_code}
-              - --lakebase-instance
-              - ${var.lakebase_instance}
-              - --pg-database
-              - ${var.lakebase_database}
-              - --secret-scope
-              - ${var.secret_scope}
-              - --dry-run
-              - ${var.dry_run}
-              - --graph-create-groups
-              - ${var.graph_create_groups}
-              - --reporting-catalog
+              - --warehouse-id
+              - ${var.warehouse_id}
+              - --catalog
               - ${var.catalog}
-              - --reporting-schema
+              - --schema
               - ${var.schema}
-              - --security-mailbox
-              - ${var.security_mailbox}
-              - --admin-mailbox
-              - ${var.admin_mailbox}
-              - --app-url
-              - ${var.app_url}
-              - --drift-allowlist
-              - ${var.drift_allowlist}
-              - --request-app-role
-              - ${var.request_app_role}
-              - --admin-app-role
-              - ${var.admin_app_role}
-              - --auditor-role
-              - ${var.lakebase_auditor_role}
+              # Each app's service principal gets its own per-table grants
+              - --request-app-sp
+              - ${resources.apps.cdp_security_request_app.service_principal_client_id}
+              - --admin-app-sp
+              - ${resources.apps.cdp_security_admin_app.service_principal_client_id}
 
-    cdp_security_provisioning:
-      name: cdp_security-provisioning-${var.env_code}
-      max_concurrent_runs: 1
-      queue:
-        enabled: true
+    cdp_security_notify:
+      name: cdp_security-notify-${var.env_code}
+      max_concurrent_runs: 1   # one sender: a notification is never sent twice
       schedule:
         quartz_cron_expression: "0 0/15 * * * ?"
         timezone_id: Europe/London
@@ -64,19 +46,33 @@ resources:
       # Add email_notifications.on_failure with your platform support mailbox
       environments: *envs
       tasks:
-        - task_key: provision
-          environment_key: default
-          timeout_seconds: 1800
-          spark_python_task:
-            python_file: ../jobs/provision.py
-            parameters: *params
         - task_key: notify
-          depends_on: [{task_key: provision}]
-          run_if: ALL_DONE
           environment_key: default
           spark_python_task:
             python_file: ../jobs/notify.py
-            parameters: *params
+            parameters: &params
+              - --bundle-root
+              - ${workspace.file_path}
+              - --env
+              - ${var.env_code}
+              - --warehouse-id
+              - ${var.warehouse_id}
+              - --catalog
+              - ${var.catalog}
+              - --schema
+              - ${var.schema}
+              - --secret-scope
+              - ${var.secret_scope}
+              - --dry-run
+              - ${var.dry_run}
+              - --admin-mailbox
+              - ${var.admin_mailbox}
+              - --app-url
+              - ${var.app_url}
+              - --admin-app-url
+              - ${var.admin_app_url}
+              - --recert-interval-days
+              - ${var.recert_interval_days}
 
     cdp_security_daily:
       name: cdp_security-daily-${var.env_code}
@@ -99,14 +95,8 @@ resources:
           spark_python_task:
             python_file: ../jobs/recertification.py
             parameters: *params
-        - task_key: drift
-          depends_on: [{task_key: recertification}]
-          environment_key: default
-          spark_python_task:
-            python_file: ../jobs/drift_detection.py
-            parameters: *params
         - task_key: reporting
-          depends_on: [{task_key: drift}]
+          depends_on: [{task_key: recertification}]
           run_if: ALL_DONE
           environment_key: default
           spark_python_task:

@@ -3,22 +3,20 @@ import streamlit as st
 from cdp_security import queries, service, ui
 
 user = ui.user()
-st.title("Access reviews")
-ui.show_flash()
-st.caption("Confirm who still needs access. Anything not reviewed by the due date is removed automatically.")
+ui.page_header("Access reviews", "recertification")
 
 items = queries.recert_items_for(user.email)
 if not items:
     st.info("You have no access reviews due.")
     st.stop()
 
-rows = [{"item_id": str(i["item_id"]), "Person": i["user_email"], "Access": i["group_name"],
-         "Classification": i["classification_code"], "Ends": i["valid_to"].date(),
+rows = [{"item_id": i["item_id"], "Person": i["user_email"], "Access": f"{i['data_product_name']} ({i['group_name']})",
+         "Ends": i["valid_to"].date(),
          "Last reviewed": i["last_recertified_at"].date() if i["last_recertified_at"] else None,
          "Due": i["due_at"].date(), "Decision": "Not reviewed", "Comment": ""} for i in items]
 edited = st.data_editor(
-    rows, hide_index=True, use_container_width=True, disabled=["item_id", "Person", "Access", "Classification",
-                                                              "Ends", "Last reviewed", "Due"],
+    rows, hide_index=True, use_container_width=True, disabled=["item_id", "Person", "Access", "Ends",
+                                                              "Last reviewed", "Due"],
     column_config={"item_id": None,
                    "Decision": st.column_config.SelectboxColumn(options=["Not reviewed", "Keep", "Remove"],
                                                                 required=True)})

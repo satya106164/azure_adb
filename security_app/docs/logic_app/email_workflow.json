@@ -1,0 +1,74 @@
+{
+  "definition": {
+    "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+      "$connections": { "type": "Object", "defaultValue": {} }
+    },
+    "triggers": {
+      "When_a_HTTP_request_is_received": {
+        "type": "Request",
+        "kind": "Http",
+        "inputs": {
+          "method": "POST",
+          "schema": {
+            "type": "object",
+            "required": ["notification_id", "to", "subject", "body", "template"],
+            "properties": {
+              "notification_id": { "type": "string" },
+              "to": { "type": "array", "items": { "type": "string" } },
+              "subject": { "type": "string" },
+              "body": { "type": "string" },
+              "link": { "type": ["string", "null"] },
+              "template": { "type": "string" },
+              "request_ref": { "type": ["string", "null"] }
+            }
+          }
+        }
+      }
+    },
+    "actions": {
+      "Compose_HTML_body": {
+        "type": "Compose",
+        "runAfter": {},
+        "inputs": "@concat('<div style=\"font-family:Segoe UI,Arial,sans-serif;color:#1B2333\"><p>', replace(replace(replace(replace(triggerBody()?['body'], '&', '&amp;'), '<', '&lt;'), '>', '&gt;'), decodeUriComponent('%0A'), '<br>'), '</p>', if(empty(triggerBody()?['link']), '', concat('<p><a href=\"', triggerBody()?['link'], '\" style=\"background:#0A2F73;color:#FFFFFF;padding:10px 18px;text-decoration:none;border-radius:4px;display:inline-block\">', if(equals(triggerBody()?['template'], 'APPROVAL_NEEDED'), 'Review this request', 'Open the app'), '</a></p>')), '</div>')"
+      },
+      "Send_an_email_(V2)": {
+        "type": "ApiConnection",
+        "runAfter": { "Compose_HTML_body": ["Succeeded"] },
+        "inputs": {
+          "host": { "connection": { "name": "@parameters('$connections')['office365']['connectionId']" } },
+          "method": "post",
+          "path": "/v2/Mail",
+          "body": {
+            "To": "@{join(triggerBody()?['to'], ';')}",
+            "Subject": "@{triggerBody()?['subject']}",
+            "Body": "@{outputs('Compose_HTML_body')}",
+            "Importance": "Normal"
+          }
+        }
+      },
+      "Response_OK": {
+        "type": "Response",
+        "kind": "Http",
+        "runAfter": { "Send_an_email_(V2)": ["Succeeded"] },
+        "inputs": {
+          "statusCode": 200,
+          "body": { "notification_id": "@{triggerBody()?['notification_id']}", "status": "sent" }
+        }
+      }
+    },
+    "outputs": {}
+  },
+  "parameters": {
+    "$connections": {
+      "value": {
+        "office365": {
+          "connectionId": "/subscriptions/<subscription-id>/resourceGroups/<resource-group>/providers/Microsoft.Web/connections/office365",
+          "connectionName": "office365",
+          "id": "/subscriptions/<subscription-id>/providers/Microsoft.Web/locations/<region>/managedApis/office365"
+        }
+      }
+    }
+  }
+}

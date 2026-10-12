@@ -7,9 +7,8 @@ import streamlit as st
 from cdp_security import queries, service, ui
 from cdp_security.models import AppRole
 
-user = ui.require(AppRole.ADMIN, AppRole.AUDITOR, AppRole.SECURITY)
-st.title("Audit and drift")
-ui.show_flash()
+user = ui.require(AppRole.ADMIN)
+ui.page_header("Audit", "audit")
 
 
 def to_csv(rows: list[dict]) -> bytes:
@@ -22,7 +21,7 @@ def to_csv(rows: list[dict]) -> bytes:
     return buf.getvalue().encode()
 
 
-tab_audit, tab_drift, tab_evidence = st.tabs(["Audit trail", "Drift findings", "Evidence pack"])
+tab_audit, tab_evidence = st.tabs(["Audit trail", "Evidence pack"])
 
 with tab_audit:
     c1, c2, c3, c4 = st.columns(4)
@@ -43,26 +42,7 @@ with tab_audit:
         else:
             st.success("Audit chain verified: no gaps and every hash matches.")
 
-with tab_drift:
-    last = queries.last_drift_run()
-    if last:
-        st.caption(f"Last run {last['started_at']:%d %b %Y %H:%M} UTC - {last['status'].lower()} - {last['summary']}")
-    statuses = st.multiselect("Status", ["OPEN", "ACKNOWLEDGED", "ACCEPTED_RISK", "REMEDIATED", "RESOLVED"],
-                              ["OPEN", "ACKNOWLEDGED"])
-    findings = queries.drift_findings(statuses)
-    ui.table(findings, ["severity", "finding_type", "securable", "principal", "privilege", "status",
-                        "first_detected_at", "last_detected_at", "resolution_note"])
-    if findings and (user.has(AppRole.SECURITY) or user.has(AppRole.ADMIN)):
-        with st.form("finding"):
-            f = st.selectbox("Finding", findings,
-                             format_func=lambda r: f"{r['finding_type']} {r['securable']} {r['principal']}")
-            new = st.selectbox("Set status", ["ACKNOWLEDGED", "REMEDIATED", "ACCEPTED_RISK"])
-            note = st.text_area("Note")
-            if st.form_submit_button("Update finding"):
-                ui.act(lambda: service.update_drift_finding(user, f["finding_id"], new, note), "Finding updated.")
-
 with tab_evidence:
-    st.caption("Every live grant with its approval trail. Use for recertification evidence and regulator requests.")
     evidence = queries.access_evidence()
     ui.table(evidence)
     st.download_button("Download evidence CSV", to_csv(evidence),
